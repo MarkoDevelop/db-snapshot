@@ -50,6 +50,8 @@ composer require --dev overthink/db-snapshot
 php artisan vendor:publish --tag="db-snapshot-config"   # optional
 ```
 
+Running artisan inside Docker? Read [Running in Docker](#running-in-docker) first: the SSH key and snapshot directory need mounts.
+
 `php artisan snapshot` asks for the connection and writes it to `.env`. To set it up by hand instead:
 
 ```dotenv
@@ -135,6 +137,46 @@ php artisan snapshot:restore 2026-10-08_120000_default --database=dev_other
 A snapshot is a directory of `tables/<table>.sql.gz` files plus `_views.sql.gz`, `_routines.sql.gz` and `manifest.json`. It's written as `<name>.partial` and renamed only when every dump succeeds. A failed pull leaves nothing behind.
 
 `snapshot:restore` refuses to run in the `production` environment.
+
+## Running in Docker
+
+When artisan runs in a container (Sail, a custom `workspace` service, …), the SSH session and the `mysql` client run there too, so the container needs the tools, the key and a place for snapshots.
+
+**Tools.** The image needs `ssh`, `bash`, `gzip` and a `mysql` client. Check with:
+
+```bash
+docker compose exec workspace sh -c 'which ssh bash gzip mysql'
+```
+
+The MariaDB `mysql` client restores into MySQL fine.
+
+**SSH key.** Mount only the key you need, read-only, into the home directory of the user the container runs as (`docker compose exec workspace id` shows it), and point `SNAPSHOT_SSH_KEY` at the path *inside* the container:
+
+```yaml
+services:
+    workspace:
+        volumes:
+            - ../:/var/www
+            - ${HOME}/.ssh/deploy_key.pem:/home/app/.ssh/snapshot_key:ro
+            - ../../snapshots:/var/snapshots
+```
+
+```dotenv
+SNAPSHOT_SSH_KEY=/home/app/.ssh/snapshot_key
+SNAPSHOT_PATH=/var/snapshots
+```
+
+- Don't mount your whole `~/.ssh`. It exposes every key to the container, and macOS-only options in `~/.ssh/config` (such as `UseKeychain`) make Linux `ssh` fail.
+- The key must not be readable by others (`chmod 600` on the host). OpenSSH refuses keys with looser permissions.
+- On the first connection `StrictHostKeyChecking=accept-new` adds the server to the container's `~/.ssh/known_hosts`. If that directory isn't persisted, this happens again after the container is recreated, which is harmless. To pin the host key instead, also mount a `known_hosts` file there.
+
+**Snapshot directory.** Point `SNAPSHOT_PATH` at a mounted directory, as above, so snapshots survive container rebuilds. Several checkouts of the same project (for example git worktrees) can mount the same directory: pull once, then restore in each checkout.
+
+**Restore target.** `snapshot:restore` and `snapshot:refresh-table` restore into the app's own database connection (`DB_HOST`, `DB_DATABASE`, …), so inside the container that's usually the `mysql` service, e.g. `DB_HOST=mysql`. Use `SNAPSHOT_CONNECTION` to pick another connection, or `--database=` for one run.
+
+**Run commands from the compose directory.** `docker compose` looks for a compose file in the current directory and then in its parents, so run `docker compose exec workspace php artisan snapshot` from the directory that holds your `docker-compose.yml`.
+
+**Developing the package locally.** With a composer path repository (`"url": "/var/db-snapshot", "options": {"symlink": true}`), `vendor/overthink/db-snapshot` is a symlink to that path. Mount the package's source at that path in **every** container that boots the app (the CLI container *and* the web/PHP-FPM container), or the web app fails with *Failed to open stream: …/DbSnapshotServiceProvider.php*.
 
 ## Testing
 
