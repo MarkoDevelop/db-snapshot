@@ -27,7 +27,8 @@ class StartCommand extends Command
 
     protected $signature = 'snapshot
         {--profile=default : Profile to use}
-        {--analyze : Re-read the remote database}';
+        {--analyze : Re-read the remote database}
+        {--fresh : Go through every step again: connection settings, analysis and profile}';
 
     protected $description = 'Guided setup: connect, analyze, configure a profile, pull and restore';
 
@@ -90,9 +91,16 @@ class StartCommand extends Command
         return $this->call('snapshot:restore', ['snapshot' => 'latest', '--profile' => $profile, '--force' => true]);
     }
 
+    protected function forceAnalyze(): bool
+    {
+        return $this->option('analyze') || $this->option('fresh');
+    }
+
     private function ensureConnectionSettings(): bool
     {
-        if (filled(config('db-snapshot.ssh.host')) && filled(config('db-snapshot.remote.database'))) {
+        $configured = filled(config('db-snapshot.ssh.host')) && filled(config('db-snapshot.remote.database'));
+
+        if ($configured && (! $this->option('fresh') || ! $this->input->isInteractive())) {
             return true;
         }
 
@@ -102,7 +110,11 @@ class StartCommand extends Command
             return false;
         }
 
-        warning('The connection to the remote database is not configured yet.');
+        if ($configured) {
+            info('Check the connection settings; Enter keeps the current value.');
+        } else {
+            warning('The connection to the remote database is not configured yet.');
+        }
 
         $manager = $this->laravel->make(DriverManager::class);
         $available = $manager->available();
@@ -131,10 +143,14 @@ class StartCommand extends Command
             );
         }
 
+        $currentPassword = (string) config('db-snapshot.remote.password');
+
         $values['SNAPSHOT_REMOTE_DB_PASSWORD'] = password(
             label: 'Database password',
-            hint: 'Leave empty to use the client config of the server user (e.g. ~/.my.cnf).',
-        );
+            hint: $currentPassword !== ''
+                ? 'Leave empty to keep the current password.'
+                : 'Leave empty to use the client config of the server user (e.g. ~/.my.cnf).',
+        ) ?: $currentPassword;
 
         foreach (self::SETTINGS as $envKey => [$configKey]) {
             config()->set("db-snapshot.{$configKey}", $configKey === 'ssh.port' || $configKey === 'remote.port' ? (int) $values[$envKey] : $values[$envKey]);
@@ -175,7 +191,7 @@ class StartCommand extends Command
     {
         $exists = file_exists(Profile::path(config('db-snapshot.profile_path'), $profile));
 
-        $edit = ! $exists || select(
+        $edit = ! $exists || $this->option('fresh') || select(
             label: "Profile [{$profile}] exists. What now?",
             options: ['use' => 'Use it as it is', 'edit' => 'Edit it first'],
         ) === 'edit';

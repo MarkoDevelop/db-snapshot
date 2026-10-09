@@ -13,6 +13,8 @@ php artisan snapshot
 
 `php artisan snapshot` walks you through everything: it asks for the SSH and database settings (and saves them to `.env`), checks the connection, analyzes the remote database, lets you build a profile, then pulls and restores. Run it again any time; it skips the steps that are already done.
 
+To go through every step again, run `php artisan snapshot --fresh`: it asks for the connection settings (prefilled, so Enter keeps them), re-analyzes the remote database and opens the profile editor.
+
 The individual steps are commands too:
 
 ```bash
