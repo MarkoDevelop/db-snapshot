@@ -180,3 +180,20 @@ it('skips the anonymize step when anonymization is off and keeps existing rules'
 
     expect(Profile::load($this->workspace.'/profiles', 'default')->ruleFor('companies')->anonymize)->toHaveKey('email');
 });
+
+it('says everything is copied in full instead of showing an empty summary', function () {
+    Process::fake();
+    app()->useDatabasePath($this->workspace.'/database');
+    (new Analysis('production', now()->toImmutable(), [
+        'users' => new TableInfo('users', false, 10, 1024 * 1024, 0),
+    ]))->save($this->workspace.'/analysis.json');
+
+    $this->artisan('snapshot:configure')
+        ->expectsQuestion('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', 'users')
+        ->expectsChoice('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', ['users'], ['users' => 'users · 1.0 MB · ~10 rows'])
+        ->expectsChoice('users (1.0 MB, ~10 rows)', 'full', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
+        ->expectsOutputToContain('All tables are copied in full.')
+        ->doesntExpectOutputToContain('In snapshot')
+        ->expectsQuestion('Save as profile', 'default')
+        ->assertSuccessful();
+});

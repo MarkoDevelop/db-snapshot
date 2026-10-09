@@ -375,7 +375,11 @@ class ConfigureCommand extends Command
             }
         }
 
-        table(['Table', 'Now', 'Rule', 'In snapshot'], $rows);
+        if ($rows === []) {
+            note('All tables are copied in full.');
+        } else {
+            table(['Table', 'Now', 'Rule', 'In snapshot'], $rows);
+        }
 
         info(sprintf(
             'Estimated snapshot: ~%s of %s (before compression; all other tables in full).',
