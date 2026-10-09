@@ -152,6 +152,11 @@ class MysqlDriver extends SshDriver
         return $this->mysqldump(['--routines', '--no-create-info', '--no-data', '--no-create-db', '--skip-triggers'], [], $file);
     }
 
+    public function dumpPostDataCommand(array $tables, string $file): ?string
+    {
+        return null;
+    }
+
     public function recreateDatabaseCommand(array $connection): array
     {
         $database = $this->localDatabase($connection);

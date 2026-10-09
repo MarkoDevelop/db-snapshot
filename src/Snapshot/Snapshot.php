@@ -17,6 +17,8 @@ final class Snapshot
 
     public const VIEWS_FILE = '_views.sql.gz';
 
+    public const POST_DATA_FILE = '_post-data.sql.gz';
+
     /**
      * @param  array{profile: string, driver?: string, database: string, created_at: string, partial?: bool, tables: array<string, array{mode: string, where: ?string, bytes: int}>}  $manifest
      */
@@ -88,6 +90,11 @@ final class Snapshot
     public function routinesFile(): ?string
     {
         return File::exists($file = $this->path.'/'.self::ROUTINES_FILE) ? $file : null;
+    }
+
+    public function postDataFile(): ?string
+    {
+        return File::exists($file = $this->path.'/'.self::POST_DATA_FILE) ? $file : null;
     }
 
     public function viewsFile(): ?string

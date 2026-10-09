@@ -83,9 +83,20 @@ interface Driver
     public function dumpViewsCommand(array $views, string $file): ?string;
 
     /**
-     * Local shell command that dumps stored routines into $file, or null if unsupported.
+     * Local shell command that dumps stored routines (and anything else tables
+     * may depend on, such as extensions) into $file, or null if unsupported.
+     * It is restored before the tables.
      */
     public function dumpRoutinesCommand(string $file): ?string;
+
+    /**
+     * Local shell command that dumps what has to be created after all rows are
+     * loaded (indexes, constraints, triggers) for $tables into $file, or null
+     * when the table dumps already contain it.
+     *
+     * @param  list<string>  $tables
+     */
+    public function dumpPostDataCommand(array $tables, string $file): ?string;
 
     /**
      * Standard input for every remote command (e.g. the password line).

@@ -19,6 +19,7 @@ use function Laravel\Prompts\error;
 use function Laravel\Prompts\info;
 use function Laravel\Prompts\multisearch;
 use function Laravel\Prompts\note;
+use function Laravel\Prompts\warning;
 
 class RefreshTableCommand extends Command
 {
@@ -110,10 +111,11 @@ class RefreshTableCommand extends Command
         };
 
         $snapshot = null;
+        $warnings = [];
 
         try {
             $snapshot = $puller->pull(new Profile('refresh', TableMode::Skip, $rules), $parallel, $report, partial: true);
-            $restorer->importTables($snapshot, $connection, $parallel, $report);
+            $warnings = $restorer->importTables($snapshot, $connection, $parallel, $report);
         } catch (Throwable $exception) {
             error($exception->getMessage());
 
@@ -122,6 +124,10 @@ class RefreshTableCommand extends Command
             if ($snapshot !== null && ! $this->option('keep')) {
                 File::deleteDirectory($snapshot->path);
             }
+        }
+
+        foreach ($warnings as $message) {
+            warning($message);
         }
 
         info('Refreshed '.implode(', ', array_keys($rules))." in {$connection['database']}.");

@@ -7,7 +7,8 @@ return [
     | Database driver
     |--------------------------------------------------------------------------
     |
-    | Built in: "mysql" (MySQL and MariaDB). Register your own driver with
+    | Built in: "mysql" (MySQL and MariaDB) and "pgsql" (PostgreSQL 13+).
+    | Register your own driver with
     | DbSnapshot::extend('name', fn ($app) => new MyDriver(...)).
     |
     */
@@ -72,6 +73,17 @@ return [
             // imported table by table. "auto" adds it unless the server's
             // mysqldump is MariaDB's, which doesn't know the option.
             'skip_gtid_purged' => 'auto',
+        ],
+
+        'pgsql' => [
+            // The schema to snapshot (and to create locally when it isn't "public").
+            'schema' => env('SNAPSHOT_PGSQL_SCHEMA', 'public'),
+
+            // Extra pg_dump options. --no-owner and --no-privileges are always used.
+            'dump_options' => [],
+
+            // Local database psql connects to while dropping and creating the target.
+            'maintenance_database' => 'postgres',
         ],
     ],
 
