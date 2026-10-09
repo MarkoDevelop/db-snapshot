@@ -6,11 +6,15 @@ use Illuminate\Console\Command;
 use Illuminate\Support\Facades\File;
 use Overthink\DbSnapshot\Analysis\Analysis;
 use Overthink\DbSnapshot\Analysis\Analyzer;
+use Overthink\DbSnapshot\Analysis\ColumnInfo;
 use Overthink\DbSnapshot\Analysis\TableInfo;
+use Overthink\DbSnapshot\Profile\AnonymizeStrategy;
+use Overthink\DbSnapshot\Profile\ColumnRule;
 use Overthink\DbSnapshot\Profile\Profile;
 use Overthink\DbSnapshot\Profile\TableMode;
 use Overthink\DbSnapshot\Profile\TableRule;
 use Overthink\DbSnapshot\Support\IndexMigration;
+use Overthink\DbSnapshot\Support\PersonalDataColumns;
 use Throwable;
 
 use function Laravel\Prompts\confirm;
@@ -19,6 +23,7 @@ use function Laravel\Prompts\info;
 use function Laravel\Prompts\multisearch;
 use function Laravel\Prompts\multiselect;
 use function Laravel\Prompts\note;
+use function Laravel\Prompts\select;
 use function Laravel\Prompts\table;
 use function Laravel\Prompts\text;
 use function Laravel\Prompts\warning;
@@ -92,7 +97,12 @@ class ConfigureCommand extends Command
             $newRules[$tableName] = $this->askRule($analysis->tables[$tableName], $rules[$tableName] ?? null);
         }
 
-        $this->summary($analysis, new Profile($profileName, $existing->defaultMode, $newRules));
+        $notPersonal = $existing->notPersonal;
+        $newRules = config('db-snapshot.anonymize.enabled')
+            ? $this->askAnonymize($analysis, $existing->defaultMode, $newRules, $rules, $notPersonal)
+            : $this->keepAnonymize($existing->defaultMode, $newRules, $rules);
+
+        $this->summary($analysis, new Profile($profileName, $existing->defaultMode, $newRules, $notPersonal));
 
         $saveAs = $this->askProfileName($profileDirectory, $profileName);
 
@@ -102,12 +112,195 @@ class ConfigureCommand extends Command
             return self::FAILURE;
         }
 
-        $profile = new Profile($saveAs, $existing->defaultMode, $newRules);
+        $profile = new Profile($saveAs, $existing->defaultMode, $newRules, $notPersonal);
         info('Saved '.$profile->save($profileDirectory).". Pull it with: php artisan snapshot:pull --profile={$saveAs}");
 
         $this->offerIndexMigration($profile, $analysis);
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Pick the columns whose values are replaced on the server, starting from
+     * what the profile anonymized before plus name-based suggestions.
+     *
+     * Suggestions that are left unchecked go to $notPersonal, so they are
+     * not suggested as new again.
+     *
+     * @param  array<string, TableRule>  $newRules
+     * @param  array<string, TableRule>  $previousRules
+     * @param  list<string>  $notPersonal  table.column entries judged fine to copy; updated in place
+     * @return array<string, TableRule>
+     */
+    private function askAnonymize(Analysis $analysis, TableMode $defaultMode, array $newRules, array $previousRules, array &$notPersonal): array
+    {
+        $copied = [];
+
+        foreach ($analysis->tables as $name => $table) {
+            $rule = $newRules[$name] ?? new TableRule($defaultMode);
+
+            if (! $table->isView && $table->columns !== [] && ! in_array($rule->mode, [TableMode::Schema, TableMode::Skip], true)) {
+                $copied[$name] = $table;
+            }
+        }
+
+        if ($copied === []) {
+            if (array_filter($analysis->tables, fn (TableInfo $table): bool => $table->columns !== []) === []) {
+                note('Re-analyze (--analyze) to see columns you can anonymize.');
+            }
+
+            return $newRules;
+        }
+
+        $previous = array_filter(array_map(fn (TableRule $rule): array => $rule->anonymize, $previousRules));
+        $previousKeys = [];
+
+        foreach ($previous as $name => $columns) {
+            foreach (array_keys($columns) as $column) {
+                $previousKeys[] = "{$name}.{$column}";
+            }
+        }
+
+        $candidates = [];
+
+        foreach ($copied as $name => $table) {
+            foreach (array_keys($previous[$name] ?? []) as $column) {
+                if ($table->column($column) === null) {
+                    warning("Dropping the anonymize rule for {$name}.{$column}: the column no longer exists.");
+                }
+            }
+
+            foreach ($table->columns as $column) {
+                $rule = $previous[$name][$column->name]
+                    ?? $table->personalData[$column->name]
+                    ?? ($table->personalData === [] ? PersonalDataColumns::suggest($name, $column) : null);
+
+                if ($rule !== null) {
+                    $candidates["{$name}.{$column->name}"] = $rule;
+                }
+            }
+        }
+
+        $chosen = $candidates === [] ? [] : multiselect(
+            label: 'Anonymize these columns (personal data)',
+            options: array_combine(
+                array_keys($candidates),
+                array_map(
+                    fn (string $key, ColumnRule $rule): string => "{$key} → {$rule->describe()}".(in_array($key, $notPersonal, true) ? ' (marked not personal)' : ''),
+                    array_keys($candidates),
+                    $candidates,
+                ),
+            ),
+            default: array_values(array_filter(
+                array_keys($candidates),
+                fn (string $key): bool => in_array($key, $previousKeys, true) || ! in_array($key, $notPersonal, true),
+            )),
+            scroll: 15,
+            hint: 'Replaced on the server while dumping. Unchecked ones are remembered as not personal.',
+        );
+
+        $others = [];
+
+        foreach ($copied as $name => $table) {
+            foreach ($table->columns as $column) {
+                if (! $column->primaryKey && ! $column->generated && ! isset($candidates["{$name}.{$column->name}"])) {
+                    $others["{$name}.{$column->name}"] = $column;
+                }
+            }
+        }
+
+        $added = $others === [] ? [] : multisearch(
+            label: 'Any other columns to anonymize? (type to search, Enter for none)',
+            options: function (string $search) use ($others): array {
+                $options = [];
+
+                foreach ($others as $key => $column) {
+                    if ($search === '' || str_contains($key, $search)) {
+                        $options[$key] = "{$key} ({$column->type})";
+                    }
+                }
+
+                return $options;
+            },
+            placeholder: 'e.g. orders.customer_note',
+            scroll: 15,
+        );
+
+        $notPersonal = array_values(array_unique([
+            ...array_diff($notPersonal, array_keys($candidates)),
+            ...array_diff(array_keys($candidates), $chosen),
+        ]));
+
+        $anonymize = [];
+
+        foreach ($chosen as $key) {
+            [$table, $column] = explode('.', (string) $key, 2);
+            $anonymize[$table][$column] = $candidates[$key];
+        }
+
+        foreach ($added as $key) {
+            [$table, $column] = explode('.', (string) $key, 2);
+            $anonymize[$table][$column] = $this->askColumnRule((string) $key, $others[$key]);
+        }
+
+        foreach ($copied as $name => $table) {
+            $rule = $newRules[$name] ?? new TableRule($defaultMode);
+
+            if (($anonymize[$name] ?? []) !== [] || $rule->anonymize !== []) {
+                $newRules[$name] = $rule->withAnonymize($anonymize[$name] ?? []);
+            }
+        }
+
+        return $newRules;
+    }
+
+    /**
+     * With anonymization off the step is skipped, but rules already in the
+     * profile are kept, so switching it back on brings them back.
+     *
+     * @param  array<string, TableRule>  $newRules
+     * @param  array<string, TableRule>  $previousRules
+     * @return array<string, TableRule>
+     */
+    private function keepAnonymize(TableMode $defaultMode, array $newRules, array $previousRules): array
+    {
+        foreach ($previousRules as $name => $previous) {
+            $rule = $newRules[$name] ?? new TableRule($defaultMode);
+
+            if ($previous->anonymize !== [] && ! in_array($rule->mode, [TableMode::Schema, TableMode::Skip], true)) {
+                $newRules[$name] = $rule->withAnonymize($previous->anonymize);
+            }
+        }
+
+        return $newRules;
+    }
+
+    private function askColumnRule(string $key, ColumnInfo $column): ColumnRule
+    {
+        $strategies = array_filter(
+            AnonymizeStrategy::cases(),
+            fn (AnonymizeStrategy $strategy): bool => ($column->isText() || ! $strategy->needsTextColumn())
+                && ($column->nullable || $strategy !== AnonymizeStrategy::Null),
+        );
+
+        $strategy = AnonymizeStrategy::from((string) select(
+            label: "Replace {$key} ({$column->type}) with",
+            options: array_combine(
+                array_map(fn (AnonymizeStrategy $strategy): string => $strategy->value, $strategies),
+                array_map(fn (AnonymizeStrategy $strategy): string => $strategy->label(), $strategies),
+            ),
+        ));
+
+        return match ($strategy) {
+            AnonymizeStrategy::Template => new ColumnRule($strategy, text(
+                label: "Template for {$key}",
+                default: ucfirst(str_replace('_', ' ', $column->name)).' {hash}',
+                required: true,
+                validate: fn (string $value): ?string => str_contains($value, '{hash}') || str_contains($value, '{id}') ? null : 'Use {hash} or {id}.',
+            )),
+            AnonymizeStrategy::Fixed => new ColumnRule($strategy, text(label: "Value for every {$key}", required: true)),
+            default => new ColumnRule($strategy),
+        };
     }
 
     private function askProfileName(string $directory, string $current): ?string
@@ -177,7 +370,7 @@ class ConfigureCommand extends Command
             $estimate = $this->estimate($table, $rule);
             $after += $estimate ?? $table->bytes();
 
-            if ($rule->mode !== TableMode::Full) {
+            if ($rule->mode !== TableMode::Full || $rule->anonymize !== []) {
                 $rows[] = [$table->name, $this->formatBytes($table->bytes()), $rule->describe(), $estimate !== null ? '~'.$this->formatBytes($estimate) : '?'];
             }
         }

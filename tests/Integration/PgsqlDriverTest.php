@@ -140,3 +140,34 @@ it('refreshes one table that other tables point at', function () {
         ->and(pgExec($this->pg, 'snapshot_target', 'SELECT count(*) FROM users'))->toBe('3')
         ->and(pgExec($this->pg, 'snapshot_target', 'SELECT count(*) FROM orders'))->toBe('2');
 });
+
+it('replaces personal data on the server and keeps it consistent', function () {
+    pgExec($this->pg, 'snapshot_source', "ALTER TABLE users ADD COLUMN name text, ADD COLUMN phone text NOT NULL DEFAULT '', ADD COLUMN nickname varchar(8);");
+    pgExec($this->pg, 'snapshot_source', "UPDATE users SET name = 'Ana Novak', phone = '+386 40 123 456' WHERE id = 1; UPDATE users SET name = 'Bor O''Hara', phone = '+386 41 999 000', nickname = 'bor' WHERE id = 2;");
+    config()->set('db-snapshot.anonymize.salt', 'pepper');
+
+    $snapshot = app(Puller::class)->pull(new Profile('default', TableMode::Full, [
+        'users' => TableRule::fromArray(['mode' => 'full', 'anonymize' => [
+            'email' => 'email',
+            'name' => ['template' => 'User {id} {hash}'],
+            'phone' => 'empty',
+            'nickname' => ['template' => 'Nick {hash}'],
+        ]]),
+    ]), 2);
+    app(Restorer::class)->restore($snapshot, [...$this->pg, 'driver' => 'pgsql', 'database' => 'snapshot_target', 'charset' => 'utf8'], 2);
+
+    $rows = pgExec($this->pg, 'snapshot_target', "SELECT id || '|' || email || '|' || name || '|' || phone || '|' || COALESCE(nickname, 'NULL') FROM users ORDER BY id");
+    $gzipped = gzdecode(File::get($snapshot->path.'/tables/users.sql.gz'));
+
+    expect($rows)->toMatch('/^1\|user_[0-9a-f]{12}@example\.test\|User 1 [0-9a-f]{12}\|\|NULL\n2\|user_[0-9a-f]{12}@example\.test\|User 2 [0-9a-f]{12}\|\|Nick [0-9a-f]{3}$/')
+        ->and($gzipped)->not->toContain('Ana@example.test')
+        ->and($gzipped)->not->toContain('Novak')
+        ->and($gzipped)->not->toContain('+386')
+        ->and(pgExec($this->pg, 'snapshot_target', 'SELECT count(*) FROM orders o JOIN users u ON u.id = o.user_id'))->toBe('3');
+
+    $again = app(Puller::class)->pull(new Profile('again', TableMode::Skip, [
+        'users' => TableRule::fromArray(['mode' => 'full', 'anonymize' => ['email' => 'email']]),
+    ]), 1, partial: true);
+
+    expect(gzdecode(File::get($again->path.'/tables/users.sql.gz')))->toContain(explode('|', explode("\n", $rows)[0])[1]);
+});

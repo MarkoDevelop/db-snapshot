@@ -125,6 +125,21 @@ abstract class SshDriver implements Driver
         return implode(' ', array_map(escapeshellarg(...), $arguments));
     }
 
+    /**
+     * Runs $steps one after another, stopping at the first failure, as one command whose output can be piped.
+     *
+     * @param  list<string>  $steps
+     */
+    protected static function script(array $steps): string
+    {
+        return 'bash -e -o pipefail -c '.escapeshellarg(implode('; ', $steps));
+    }
+
+    protected static function printLine(string $line): string
+    {
+        return "printf '%s\\n' ".escapeshellarg($line);
+    }
+
     private function withPassword(string $script): string
     {
         $variable = $this->passwordVariable();

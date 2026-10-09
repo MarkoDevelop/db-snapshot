@@ -74,6 +74,8 @@ SNAPSHOT_PATH=/var/snapshots        # default: storage/db-snapshots
 SNAPSHOT_PARALLEL=4
 SNAPSHOT_CONNECTION=                # restore target, default: the app's default connection
 SNAPSHOT_DATABASE_NAME={source}_{date}   # name offered for a new database per snapshot
+SNAPSHOT_ANONYMIZE=false                 # replace personal data while pulling (see below)
+SNAPSHOT_ANONYMIZE_SALT=                 # same fakes in every snapshot when set
 ```
 
 The remote password goes to the SSH session's stdin and is exported there (as `MYSQL_PWD` for the mysql driver), so it never shows up in a command line on either machine. Leave it empty to use the server user's `~/.my.cnf`.
@@ -119,6 +121,57 @@ Filtering by date leaves rows in other tables that point at rows not copied. Res
 `snapshot:analyze` writes `database/snapshot-analysis.json`: every remote table with its size, row count and date columns, plus the date range of indexed date columns on large tables. Commit it, so teammates can run `snapshot:configure` without touching the server first.
 
 `snapshot:configure` and `snapshot:pull` check how old the analysis is. If it's older than `analysis_max_age_days` (30 by default), they ask whether to **Analyze now** or continue with the current one. Without interaction they only warn. Pass `--analyze` to either command to refresh it without being asked.
+
+## Anonymizing personal data
+
+Off by default. Turn it on per project with:
+
+```dotenv
+SNAPSHOT_ANONYMIZE=true
+```
+
+While it's off, `snapshot:configure` has no anonymize step, `snapshot:analyze` writes no suggestions, and `snapshot:pull` copies every table as it is. If the profile has anonymize rules, pull says which tables it copied unchanged. The rules stay in the profile for when it's switched on.
+
+With it on, columns can be replaced while the dump runs on the server, so real names, emails or phone numbers never leave it, and snapshot files are safe to keep around. For an orders table you keep the order number, totals and dates, and drop who placed the order:
+
+```json
+"orders": {
+    "mode": "recent", "column": "created_at", "months": 12,
+    "anonymize": {
+        "customer_email": "email",
+        "customer_name": { "template": "Customer {hash}" },
+        "customer_phone": "null",
+        "shipping_address": { "template": "Street {id}" },
+        "notes": "empty"
+    }
+},
+"users": { "mode": "full", "anonymize": { "email": "email", "name": { "template": "User {id}" }, "password": { "fixed": "$2y$12$…" } } }
+```
+
+| Strategy | Becomes (NULL stays NULL) |
+| --- | --- |
+| `email` | `user_<hash>@example.test` |
+| `hash` | `<hash>`: 12 hex characters |
+| `template` | your text with `{hash}` and/or `{id}` (the row's single-column primary key) |
+| `fixed` | the same value for every row, e.g. one known password hash so everyone can log in |
+| `null` / `empty` | `NULL` / `''` |
+
+- `{hash}` is a salted SHA-256 of the original value, so the same email becomes the same fake in every row and table: joins, duplicates and unique indexes keep working.
+- Set `SNAPSHOT_ANONYMIZE_SALT` to get the same fakes in every snapshot. Without it, a random salt is used per pull.
+- Results are cut to the column's length.
+- `email`, `hash`, `template` and `empty` need text columns. Other columns can use `null` (if nullable) or `fixed`.
+- `snapshot:pull` checks every rule against the real columns before dumping anything and lists all problems at once.
+
+`snapshot:analyze` looks for columns that seem personal by name (emails, person names, phones, street addresses, IPs, IBANs, tokens…) and writes them, with a suggested replacement, to `personal_data` in `snapshot-analysis.json`. They're only suggestions. The profile decides what's anonymized:
+
+- `snapshot:configure` lists the suggestions. New ones are pre-checked, and you can search for any other column.
+- Suggestions you uncheck go to the profile's `not_personal` list (`"not_personal": ["products.name"]`), so they aren't treated as new again. They still show up, unchecked, if you change your mind.
+- `snapshot:analyze` and `snapshot:pull` warn about suggested columns the profile neither anonymizes nor lists in `not_personal`, e.g. after a migration added `orders.customer_phone`.
+- Hand edits to the profile always win. Your own strategy for a column is kept, rules for columns that no longer exist are dropped by `snapshot:configure` with a warning, and a rule that can't work fails `snapshot:pull` before anything is dumped.
+
+Treat the suggestions as a starting point. Personal data also hides in free-text notes, JSON columns, logs and audit tables, so review what you copy.
+
+How it works: for anonymized tables, MySQL dumps the definition with `mysqldump` and generates the rows with a `SELECT` on the server (one `INSERT` per row, so it's slower than plain `mysqldump`). PostgreSQL uses `COPY (SELECT …)`. Both drivers implement the optional `AnonymizesColumns` interface.
 
 ## What to commit
 
@@ -268,10 +321,11 @@ composer test
 composer analyse
 ```
 
-The PostgreSQL integration tests run against a real server and are skipped unless `DB_SNAPSHOT_PGSQL_HOST` is set (`DB_SNAPSHOT_PGSQL_PORT`, `_USERNAME` and `_PASSWORD` are optional). `pg_dump` and `psql` must be on `PATH`:
+The integration tests run against real servers and are skipped unless `DB_SNAPSHOT_PGSQL_HOST` / `DB_SNAPSHOT_MYSQL_HOST` are set (`_PORT`, `_USERNAME` and `_PASSWORD` are optional). The database's command line tools must be on `PATH`:
 
 ```bash
-DB_SNAPSHOT_PGSQL_HOST=127.0.0.1 DB_SNAPSHOT_PGSQL_PASSWORD=secret vendor/bin/pest tests/Integration
+DB_SNAPSHOT_PGSQL_HOST=127.0.0.1 DB_SNAPSHOT_PGSQL_PASSWORD=secret vendor/bin/pest tests/Integration/PgsqlDriverTest.php
+DB_SNAPSHOT_MYSQL_HOST=127.0.0.1 DB_SNAPSHOT_MYSQL_PASSWORD=secret vendor/bin/pest tests/Integration/MysqlDriverTest.php
 ```
 
 ## Changelog

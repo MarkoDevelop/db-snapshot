@@ -9,9 +9,14 @@ use Illuminate\Process\PendingProcess;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Process;
 use Overthink\DbSnapshot\Analysis\Analyzer;
+use Overthink\DbSnapshot\Analysis\ColumnInfo;
+use Overthink\DbSnapshot\Analysis\TableInfo;
+use Overthink\DbSnapshot\Contracts\AnonymizesColumns;
 use Overthink\DbSnapshot\Contracts\Driver;
+use Overthink\DbSnapshot\Profile\AnonymizeStrategy;
 use Overthink\DbSnapshot\Profile\Profile;
 use Overthink\DbSnapshot\Profile\TableMode;
+use Overthink\DbSnapshot\Profile\TableRule;
 use RuntimeException;
 
 /**
@@ -24,6 +29,8 @@ final class Puller
         private readonly Analyzer $analyzer,
         private readonly ParallelRunner $runner,
         private readonly string $basePath,
+        private readonly ?string $anonymizeSalt = null,
+        private readonly bool $anonymize = true,
     ) {}
 
     /**
@@ -44,6 +51,7 @@ final class Puller
         $jobs = [];
         $manifestTables = [];
         $views = [];
+        $anonymizer = $this->anonymizer($profile, $tables);
 
         foreach ($tables as $table) {
             $rule = $profile->ruleFor($table->name);
@@ -65,8 +73,10 @@ final class Puller
             };
 
             $file = $directory.'/'.Snapshot::TABLES_DIRECTORY."/{$table->name}.sql.gz";
-            $jobs[$table->name] = $this->job($this->driver->dumpTableCommand($table->name, $rule->mode === TableMode::Schema, $where, $file));
-            $manifestTables[$table->name] = ['mode' => $rule->mode->value, 'where' => $where, 'file' => $file];
+            $jobs[$table->name] = $this->job($rule->anonymize !== [] && $anonymizer !== null
+                ? $anonymizer($table->name, $rule, $where, $file)
+                : $this->driver->dumpTableCommand($table->name, $rule->mode === TableMode::Schema, $where, $file));
+            $manifestTables[$table->name] = ['mode' => $rule->mode->value, 'where' => $where, 'file' => $file, 'anonymized' => $anonymizer !== null ? array_keys($rule->anonymize) : []];
         }
 
         $dataTables = array_keys($manifestTables);
@@ -108,11 +118,12 @@ final class Puller
             'database' => $this->driver->database(),
             'created_at' => $now->toIso8601String(),
             'partial' => $partial,
-            'tables' => array_map(fn (array $table): array => [
+            'tables' => array_map(fn (array $table): array => array_filter([
                 'mode' => $table['mode'],
                 'where' => $table['where'],
+                'anonymized' => $table['anonymized'] === [] ? false : $table['anonymized'],
                 'bytes' => File::exists($table['file']) ? File::size($table['file']) : 0,
-            ], $manifestTables),
+            ], fn (mixed $value): bool => $value !== false), $manifestTables),
         ];
 
         File::put($directory.'/manifest.json', json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)."\n");
@@ -134,6 +145,76 @@ final class Puller
         if (! File::exists($gitignore)) {
             File::put($gitignore, "*\n!.gitignore\n");
         }
+    }
+
+    /**
+     * A function building anonymized dump commands, or null when the profile
+     * anonymizes nothing. Every rule is checked against the real columns
+     * first, so a typo fails the pull before anything is dumped.
+     *
+     * @param  array<string, TableInfo>  $tables
+     * @return (Closure(string, TableRule, ?string, string): string)|null
+     */
+    private function anonymizer(Profile $profile, array $tables): ?Closure
+    {
+        if (! $this->anonymize) {
+            return null;
+        }
+
+        $anonymizing = array_filter(
+            array_map(fn (TableInfo $table): TableRule => $profile->ruleFor($table->name), $tables),
+            fn (TableRule $rule): bool => $rule->anonymize !== [] && ! in_array($rule->mode, [TableMode::Schema, TableMode::Skip], true),
+        );
+
+        if ($anonymizing === []) {
+            return null;
+        }
+
+        if (! $this->driver instanceof AnonymizesColumns) {
+            throw new RuntimeException("The {$this->driver->name()} driver can't anonymize columns, but profile [{$profile->name}] asks for it.");
+        }
+
+        $driver = $this->driver;
+        $columns = $driver->columns();
+        $salt = $this->anonymizeSalt ?: bin2hex(random_bytes(16));
+        $errors = [];
+
+        foreach ($anonymizing as $table => $rule) {
+            $tableColumns = $columns[$table] ?? [];
+            $primaryKeys = array_values(array_filter($tableColumns, fn (ColumnInfo $column): bool => $column->primaryKey));
+
+            foreach ($rule->anonymize as $name => $columnRule) {
+                $column = current(array_filter($tableColumns, fn (ColumnInfo $column): bool => $column->name === $name)) ?: null;
+
+                $errors[] = match (true) {
+                    $column === null => "{$table}.{$name} does not exist",
+                    $columnRule->strategy->needsTextColumn() && ! $column->isText() => "{$table}.{$name} is {$column->type}; \"{$columnRule->strategy->value}\" needs a text column (use \"null\" or \"fixed\")",
+                    $columnRule->strategy === AnonymizeStrategy::Null && ! $column->nullable => "{$table}.{$name} is NOT NULL; \"null\" would fail (use \"empty\" or \"fixed\")",
+                    $columnRule->usesId() && count($primaryKeys) !== 1 => "{$table}.{$name} uses {id}, but {$table} has no single-column primary key",
+                    default => null,
+                };
+            }
+        }
+
+        $errors = array_filter($errors);
+
+        if ($errors !== []) {
+            throw new RuntimeException("Profile [{$profile->name}] can't anonymize:\n  ".implode("\n  ", $errors));
+        }
+
+        return function (string $table, TableRule $rule, ?string $where, string $file) use ($driver, $columns, $salt): string {
+            $primaryKeys = array_values(array_filter($columns[$table], fn (ColumnInfo $column): bool => $column->primaryKey));
+            $primaryKey = count($primaryKeys) === 1 ? $primaryKeys[0]->name : null;
+            $expressions = [];
+
+            foreach ($columns[$table] as $column) {
+                if (isset($rule->anonymize[$column->name])) {
+                    $expressions[$column->name] = $driver->anonymizedExpression($column, $rule->anonymize[$column->name], $salt, $primaryKey);
+                }
+            }
+
+            return $driver->dumpAnonymizedTableCommand($table, $where, $file, $columns[$table], $expressions);
+        };
     }
 
     /**

@@ -4,6 +4,8 @@ namespace Overthink\DbSnapshot\Commands;
 
 use Overthink\DbSnapshot\Analysis\Analysis;
 use Overthink\DbSnapshot\Analysis\Analyzer;
+use Overthink\DbSnapshot\Profile\ColumnRule;
+use Overthink\DbSnapshot\Profile\Profile;
 
 use function Laravel\Prompts\note;
 use function Laravel\Prompts\select;
@@ -57,6 +59,26 @@ trait UsesAnalysis
         );
 
         return $choice === 'analyze' ? $this->analyzeNow($analyzer, $path) : $analysis;
+    }
+
+    /**
+     * Point out columns that look personal and that $profile neither
+     * anonymizes nor marks as not personal.
+     */
+    protected function warnAboutUndecidedPersonalData(Analysis $analysis, Profile $profile): void
+    {
+        $undecided = config('db-snapshot.anonymize.enabled') ? $profile->undecidedPersonalData($analysis) : [];
+
+        if ($undecided === []) {
+            return;
+        }
+
+        warning(sprintf(
+            "Columns that look personal, not anonymized in profile [%s]:\n%s\nRun php artisan snapshot:configure %s to anonymize them or mark them as not personal.",
+            $profile->name,
+            implode("\n", array_map(fn (string $key, ColumnRule $rule): string => "  {$key} → {$rule->describe()}", array_keys($undecided), $undecided)),
+            $profile->name,
+        ));
     }
 
     protected function forceAnalyze(): bool

@@ -34,7 +34,7 @@ class PullCommand extends Command
         $parallel = (int) ($this->option('parallel') ?: config('db-snapshot.parallel'));
 
         try {
-            $this->analysis($analyzer, required: false);
+            $analysis = $this->analysis($analyzer, required: false);
 
             $profileName = (string) $this->option('profile');
 
@@ -46,6 +46,16 @@ class PullCommand extends Command
             }
 
             $profile = Profile::load(config('db-snapshot.profile_path'), $profileName);
+
+            if ($analysis !== null) {
+                $this->warnAboutUndecidedPersonalData($analysis, $profile);
+            }
+
+            $ignored = array_keys(array_filter($profile->tables, fn ($rule): bool => $rule->anonymize !== []));
+
+            if ($ignored !== [] && ! config('db-snapshot.anonymize.enabled')) {
+                note('Anonymization is off (SNAPSHOT_ANONYMIZE), so these tables are copied as they are: '.implode(', ', $ignored));
+            }
 
             note("Pulling profile [{$profile->name}] with {$parallel} parallel sessions…");
 

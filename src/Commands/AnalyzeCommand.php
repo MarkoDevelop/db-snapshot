@@ -7,6 +7,7 @@ use Overthink\DbSnapshot\Analysis\Analysis;
 use Overthink\DbSnapshot\Analysis\Analyzer;
 use Overthink\DbSnapshot\Analysis\DateColumn;
 use Overthink\DbSnapshot\Analysis\TableInfo;
+use Overthink\DbSnapshot\Profile\Profile;
 use Throwable;
 
 use function Laravel\Prompts\error;
@@ -17,6 +18,7 @@ use function Laravel\Prompts\table;
 class AnalyzeCommand extends Command
 {
     use Formats;
+    use UsesAnalysis;
 
     protected $signature = 'snapshot:analyze {--top=25 : How many of the largest tables to show}';
 
@@ -37,6 +39,12 @@ class AnalyzeCommand extends Command
 
         $path = config('db-snapshot.analysis_path');
         $analysis->save($path);
+
+        $profileDirectory = config('db-snapshot.profile_path');
+
+        foreach (Profile::names($profileDirectory) as $name) {
+            $this->warnAboutUndecidedPersonalData($analysis, Profile::load($profileDirectory, $name));
+        }
 
         $this->render($analysis, (int) $this->option('top'));
 

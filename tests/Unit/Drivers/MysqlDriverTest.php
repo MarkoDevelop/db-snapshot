@@ -3,7 +3,10 @@
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Process;
+use Overthink\DbSnapshot\Analysis\ColumnInfo;
 use Overthink\DbSnapshot\Drivers\MysqlDriver;
+use Overthink\DbSnapshot\Profile\AnonymizeStrategy;
+use Overthink\DbSnapshot\Profile\ColumnRule;
 
 /**
  * Puts stub `ssh` and `mysqldump` executables first on PATH: the ssh stub runs
@@ -129,4 +132,42 @@ it('lets the config force GTID_PURGED handling either way', function () {
     expect($forced)->toContain('--set-gtid-purged=OFF')
         ->and($disabled)->not->toContain('--set-gtid-purged');
     Process::assertNothingRan();
+});
+
+function mysqlForAnonymizing(): MysqlDriver
+{
+    return new MysqlDriver(['host' => 'db.example.test'], ['database' => 'production'], skipGtidPurged: false);
+}
+
+it('builds salted, NULL-keeping and length-limited replacement expressions', function () {
+    $email = new ColumnInfo('email', 'varchar', ColumnInfo::TEXT, 50);
+
+    expect(mysqlForAnonymizing()->anonymizedExpression($email, new ColumnRule(AnonymizeStrategy::Email), 'pepper', 'id'))
+        ->toBe("IF(`email` IS NULL, NULL, LEFT(CONCAT('user_', LEFT(SHA2(CONCAT('pepper', `email`), 256), 12), '@example.test'), 50))")
+        ->and(mysqlForAnonymizing()->anonymizedExpression($email, new ColumnRule(AnonymizeStrategy::Template, "O'Hara {id}"), 'pepper', 'id'))
+        ->toBe("IF(`email` IS NULL, NULL, LEFT(CONCAT('O\\'Hara ', CAST(`id` AS CHAR)), 50))")
+        ->and(mysqlForAnonymizing()->anonymizedExpression($email, new ColumnRule(AnonymizeStrategy::Null), 'pepper', 'id'))->toBe('NULL');
+});
+
+it('dumps anonymized tables as generated inserts with triggers after the rows', function () {
+    $columns = [
+        new ColumnInfo('id', 'int', primaryKey: true, nullable: false),
+        new ColumnInfo('email', 'varchar', ColumnInfo::TEXT, 191),
+        new ColumnInfo('avatar', 'blob', ColumnInfo::BINARY),
+        new ColumnInfo('email_domain', 'varchar', ColumnInfo::TEXT, 191, generated: true),
+    ];
+    $command = mysqlForAnonymizing()->dumpAnonymizedTableCommand('users', "`created_at` >= '2026-01-01 00:00:00'", $this->workspace.'/users.sql.gz', $columns, ['email' => "'x'"]);
+
+    $dump = runDumpWithStubs($command, [
+        'mysqldump' => 'echo "-- mysqldump $*"',
+        'mysql' => 'echo "-- mysql ${@: -1}"',
+    ], $this->workspace);
+
+    expect(explode("\n", trim($dump)))->toBe([
+        '-- mysqldump --host=127.0.0.1 --port=3306 --user=root --no-data --skip-triggers production users',
+        "SET NAMES utf8mb4; SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO'; SET autocommit = 0;",
+        "-- mysql SELECT CONCAT('INSERT INTO `users` (`id`, `email`, `avatar`) VALUES (', CONCAT_WS(', ', QUOTE(`id`), QUOTE('x'), IF(`avatar` IS NULL, 'NULL', CONCAT('0x', HEX(`avatar`)))), ');') FROM `production`.`users` WHERE `created_at` >= '2026-01-01 00:00:00'",
+        'COMMIT;',
+        '-- mysqldump --host=127.0.0.1 --port=3306 --user=root --no-create-info --no-data --triggers production users',
+    ]);
 });

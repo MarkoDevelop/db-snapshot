@@ -4,9 +4,13 @@ namespace Overthink\DbSnapshot\Drivers;
 
 use Carbon\CarbonImmutable;
 use InvalidArgumentException;
+use Overthink\DbSnapshot\Analysis\ColumnInfo;
 use Overthink\DbSnapshot\Analysis\DateColumn;
 use Overthink\DbSnapshot\Analysis\TableInfo;
+use Overthink\DbSnapshot\Contracts\AnonymizesColumns;
 use Overthink\DbSnapshot\Contracts\RetriesConflictingImports;
+use Overthink\DbSnapshot\Profile\AnonymizeStrategy;
+use Overthink\DbSnapshot\Profile\ColumnRule;
 
 /**
  * PostgreSQL: the pg_catalog, pg_dump and psql on the server, psql locally.
@@ -17,7 +21,7 @@ use Overthink\DbSnapshot\Contracts\RetriesConflictingImports;
  * is restored after all rows are in; foreign keys are created NOT VALID, so
  * rows that point at filtered-out rows don't stop the restore.
  */
-class PgsqlDriver extends SshDriver implements RetriesConflictingImports
+class PgsqlDriver extends SshDriver implements AnonymizesColumns, RetriesConflictingImports
 {
     /**
      * @param  array{host?: ?string, user?: ?string, port?: int, key?: ?string, options?: list<string>}  $ssh
@@ -150,14 +154,85 @@ class PgsqlDriver extends SshDriver implements RetriesConflictingImports
                 '--table='.$qualified,
             ]);
         } else {
-            $steps[] = $this->pgDump(['--section=pre-data', '--table='.$qualified]);
-            $steps[] = self::printLine("COPY {$qualified} FROM stdin;");
-            $steps[] = self::shellCommand(['psql', ...$this->remoteConnectionOptions(), '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-c', "COPY (SELECT * FROM {$qualified} WHERE {$where}) TO STDOUT"]);
-            $steps[] = self::printLine('\\.');
-            $steps[] = self::printLine($this->resetSequencesSql($qualified));
+            $steps = [...$steps, ...$this->copySteps($qualified, '*', '', $where)];
         }
 
         return $this->dumpToFile(self::script($steps), $file);
+    }
+
+    public function columns(): array
+    {
+        $rows = $this->select(
+            'SELECT c.relname, a.attname, format_type(a.atttypid, a.atttypmod), t.typcategory, t.typname,'
+            ." CASE WHEN t.typcategory = 'S' AND a.atttypmod > 4 THEN a.atttypmod - 4 END,"
+            ." a.attgenerated <> '',"
+            .' EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisprimary AND a.attnum = ANY (i.indkey)),'
+            .' NOT a.attnotnull'
+            .' FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace'
+            .' JOIN pg_type t ON t.oid = a.atttypid'
+            .' WHERE n.nspname = '.$this->quote($this->schema)." AND c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped"
+            .' ORDER BY c.relname, a.attnum'
+        );
+
+        $columns = [];
+
+        foreach ($rows as [$table, $column, $type, $category, $typeName, $maxLength, $generated, $primaryKey, $nullable]) {
+            $columns[$table][] = new ColumnInfo(
+                $column,
+                $type,
+                match (true) {
+                    $category === 'S' => ColumnInfo::TEXT,
+                    $typeName === 'bytea' => ColumnInfo::BINARY,
+                    default => ColumnInfo::OTHER,
+                },
+                $maxLength !== null ? (int) $maxLength : null,
+                $generated === 't',
+                $primaryKey === 't',
+                $nullable === 't',
+            );
+        }
+
+        return $columns;
+    }
+
+    public function anonymizedExpression(ColumnInfo $column, ColumnRule $rule, string $salt, ?string $primaryKey): string
+    {
+        $value = $this->identifier($column->name);
+        $hash = "left(encode(sha256(convert_to({$this->quote($salt)} || {$value}::text, 'UTF8')), 'hex'), 12)";
+
+        $expression = match ($rule->strategy) {
+            AnonymizeStrategy::Null => 'NULL',
+            AnonymizeStrategy::Empty => "''",
+            AnonymizeStrategy::Fixed => $this->quote((string) $rule->value),
+            AnonymizeStrategy::Hash => $hash,
+            AnonymizeStrategy::Email => "'user_' || {$hash} || '@example.test'",
+            AnonymizeStrategy::Template => implode(' || ', $this->templateParts((string) $rule->value, $hash, $primaryKey)),
+        };
+
+        if ($column->maxLength !== null && $rule->strategy !== AnonymizeStrategy::Null) {
+            $expression = "left({$expression}, {$column->maxLength})";
+        }
+
+        return $rule->strategy === AnonymizeStrategy::Null ? $expression : "CASE WHEN {$value} IS NULL THEN NULL ELSE {$expression} END";
+    }
+
+    public function dumpAnonymizedTableCommand(string $table, ?string $where, string $file, array $columns, array $expressions): string
+    {
+        $qualified = $this->qualified($table);
+        $columns = array_values(array_filter($columns, fn (ColumnInfo $column): bool => ! $column->generated));
+
+        $select = implode(', ', array_map(
+            fn (ColumnInfo $column): string => isset($expressions[$column->name])
+                ? "({$expressions[$column->name]})::text AS {$this->identifier($column->name)}"
+                : $this->identifier($column->name),
+            $columns,
+        ));
+        $list = ' ('.implode(', ', array_map(fn (ColumnInfo $column): string => $this->identifier($column->name), $columns)).')';
+
+        return $this->dumpToFile(self::script([
+            self::printLine("DROP TABLE IF EXISTS {$qualified} CASCADE;"),
+            ...$this->copySteps($qualified, $select, $list, $where),
+        ]), $file);
     }
 
     public function dumpViewsCommand(array $views, string $file): ?string
@@ -252,6 +327,41 @@ class PgsqlDriver extends SshDriver implements RetriesConflictingImports
         ];
     }
 
+    /**
+     * The table definition, then its rows as COPY data from a SELECT, then
+     * moving its sequences past the restored rows.
+     *
+     * @return list<string>
+     */
+    private function copySteps(string $qualified, string $select, string $columnList, ?string $where): array
+    {
+        return [
+            $this->pgDump(['--section=pre-data', '--table='.$qualified]),
+            self::printLine("COPY {$qualified}{$columnList} FROM stdin;"),
+            self::shellCommand(['psql', ...$this->remoteConnectionOptions(), '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-c', "COPY (SELECT {$select} FROM {$qualified}".($where !== null ? " WHERE {$where}" : '').') TO STDOUT']),
+            self::printLine('\\.'),
+            self::printLine($this->resetSequencesSql($qualified)),
+        ];
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function templateParts(string $template, string $hash, ?string $primaryKey): array
+    {
+        $parts = [];
+
+        foreach (preg_split('/(\{hash\}|\{id\})/', $template, flags: PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY) ?: [] as $part) {
+            $parts[] = match ($part) {
+                '{hash}' => $hash,
+                '{id}' => $this->identifier((string) $primaryKey).'::text',
+                default => $this->quote($part),
+            };
+        }
+
+        return $parts;
+    }
+
     public function quote(string $value): string
     {
         return "'".str_replace("'", "''", $value)."'";
@@ -340,20 +450,5 @@ class PgsqlDriver extends SshDriver implements RetriesConflictingImports
     private function identifier(string $name): string
     {
         return '"'.str_replace('"', '""', $name).'"';
-    }
-
-    /**
-     * Runs $steps one after another, stopping at the first failure, as one command whose output can be piped.
-     *
-     * @param  list<string>  $steps
-     */
-    private static function script(array $steps): string
-    {
-        return 'bash -e -o pipefail -c '.escapeshellarg(implode('; ', $steps));
-    }
-
-    private static function printLine(string $line): string
-    {
-        return "printf '%s\\n' ".escapeshellarg($line);
     }
 }

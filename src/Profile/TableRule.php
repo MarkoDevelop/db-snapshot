@@ -7,13 +7,27 @@ use InvalidArgumentException;
 
 final class TableRule
 {
+    /**
+     * @param  array<string, ColumnRule>  $anonymize  column => how to anonymize it
+     */
     public function __construct(
         public readonly TableMode $mode,
         public readonly ?string $column = null,
         public readonly ?int $months = null,
         public readonly ?string $since = null,
         public readonly ?string $where = null,
+        public readonly array $anonymize = [],
     ) {
+        if ($anonymize !== [] && in_array($mode, [TableMode::Schema, TableMode::Skip], true)) {
+            throw new InvalidArgumentException('"anonymize" only applies to rules that copy rows.');
+        }
+
+        foreach (array_keys($anonymize) as $anonymizedColumn) {
+            if (! preg_match('/^[A-Za-z0-9_]+$/', (string) $anonymizedColumn)) {
+                throw new InvalidArgumentException("Invalid column name [{$anonymizedColumn}] in \"anonymize\".");
+            }
+        }
+
         if ($mode === TableMode::Recent) {
             if ($column === null || ! preg_match('/^[A-Za-z0-9_]+$/', $column)) {
                 throw new InvalidArgumentException('A "recent" rule needs a valid "column".');
@@ -38,7 +52,7 @@ final class TableRule
     }
 
     /**
-     * @param  array{mode: string, column?: string, months?: int, since?: string, where?: string}  $data
+     * @param  array{mode: string, column?: string, months?: int, since?: string, where?: string, anonymize?: array<string, string|array<string, string>>}  $data
      */
     public static function fromArray(array $data): self
     {
@@ -48,21 +62,36 @@ final class TableRule
             isset($data['months']) ? (int) $data['months'] : null,
             $data['since'] ?? null,
             $data['where'] ?? null,
+            array_map(ColumnRule::fromJson(...), $data['anonymize'] ?? []),
         );
     }
 
     /**
-     * @return array{mode: string, column?: string, months?: int, since?: string, where?: string}
+     * @return array{mode: string, column?: string, months?: int, since?: string, where?: string, anonymize?: array<string, string|array<string, string>>}
      */
     public function toArray(): array
     {
+        $anonymize = $this->anonymize;
+        ksort($anonymize);
+
         return array_filter([
             'mode' => $this->mode->value,
             'column' => $this->column,
             'months' => $this->months,
             'since' => $this->since,
             'where' => $this->where,
+            'anonymize' => $anonymize === [] ? null : array_map(fn (ColumnRule $rule): string|array => $rule->toJson(), $anonymize),
         ], fn (mixed $value): bool => $value !== null);
+    }
+
+    /**
+     * The same rule with other anonymized columns.
+     *
+     * @param  array<string, ColumnRule>  $anonymize
+     */
+    public function withAnonymize(array $anonymize): self
+    {
+        return new self($this->mode, $this->column, $this->months, $this->since, $this->where, $anonymize);
     }
 
     /**
@@ -83,12 +112,16 @@ final class TableRule
 
     public function describe(): string
     {
-        return match ($this->mode) {
+        $description = match ($this->mode) {
             TableMode::Recent => $this->months !== null
                 ? "last {$this->months} months by {$this->column}"
                 : "{$this->column} since {$this->since}",
             TableMode::Where => "where {$this->where}",
             default => $this->mode->value,
         };
+
+        return $this->anonymize === []
+            ? $description
+            : $description.', anonymizes '.implode(', ', array_keys($this->anonymize));
     }
 }

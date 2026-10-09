@@ -3,14 +3,19 @@
 namespace Overthink\DbSnapshot\Analysis;
 
 use Carbon\CarbonImmutable;
+use Overthink\DbSnapshot\Contracts\AnonymizesColumns;
 use Overthink\DbSnapshot\Contracts\Driver;
+use Overthink\DbSnapshot\Support\PersonalDataColumns;
 
 /**
  * Collects table sizes and date columns of the source database.
  */
 final class Analyzer
 {
-    public function __construct(private readonly Driver $driver) {}
+    public function __construct(
+        private readonly Driver $driver,
+        private readonly bool $suggestPersonalData = false,
+    ) {}
 
     /**
      * Ranges (MIN/MAX) are only read for indexed date columns of tables at
@@ -21,6 +26,7 @@ final class Analyzer
         $tables = $this->driver->tables();
         $dateColumns = $this->driver->dateColumns();
         $ranges = $this->driver->dateRanges($this->rangeColumns($tables, $dateColumns, $rangeThresholdMb * 1024 * 1024));
+        $allColumns = $this->driver instanceof AnonymizesColumns ? $this->driver->columns() : [];
 
         $result = [];
 
@@ -36,7 +42,15 @@ final class Analyzer
                 $dateColumns[$name] ?? [],
             );
 
-            $result[$name] = new TableInfo($name, $table->isView, $table->rows, $table->dataBytes, $table->indexBytes, $columns);
+            $personalData = [];
+
+            foreach ($table->isView || ! $this->suggestPersonalData ? [] : $allColumns[$name] ?? [] as $column) {
+                if (($suggestion = PersonalDataColumns::suggest($name, $column)) !== null) {
+                    $personalData[$column->name] = $suggestion;
+                }
+            }
+
+            $result[$name] = new TableInfo($name, $table->isView, $table->rows, $table->dataBytes, $table->indexBytes, $columns, $allColumns[$name] ?? [], $personalData);
         }
 
         return new Analysis($this->driver->database(), CarbonImmutable::now(), $result);
