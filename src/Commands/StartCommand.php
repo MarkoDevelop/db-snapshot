@@ -28,7 +28,7 @@ class StartCommand extends Command
     protected $signature = 'snapshot
         {--profile=default : Profile to use}
         {--analyze : Re-read the remote database}
-        {--fresh : Go through every step again: connection settings, analysis and profile}';
+        {--fresh : Re-analyze the remote database and edit the profile, even if both exist}';
 
     protected $description = 'Guided setup: connect, analyze, configure a profile, pull and restore';
 
@@ -98,9 +98,7 @@ class StartCommand extends Command
 
     private function ensureConnectionSettings(): bool
     {
-        $configured = filled(config('db-snapshot.ssh.host')) && filled(config('db-snapshot.remote.database'));
-
-        if ($configured && (! $this->option('fresh') || ! $this->input->isInteractive())) {
+        if (filled(config('db-snapshot.ssh.host')) && filled(config('db-snapshot.remote.database'))) {
             return true;
         }
 
@@ -110,11 +108,7 @@ class StartCommand extends Command
             return false;
         }
 
-        if ($configured) {
-            info('Check the connection settings; Enter keeps the current value.');
-        } else {
-            warning('The connection to the remote database is not configured yet.');
-        }
+        warning('The connection to the remote database is not configured yet.');
 
         $manager = $this->laravel->make(DriverManager::class);
         $available = $manager->available();
@@ -143,14 +137,10 @@ class StartCommand extends Command
             );
         }
 
-        $currentPassword = (string) config('db-snapshot.remote.password');
-
         $values['SNAPSHOT_REMOTE_DB_PASSWORD'] = password(
             label: 'Database password',
-            hint: $currentPassword !== ''
-                ? 'Leave empty to keep the current password.'
-                : 'Leave empty to use the client config of the server user (e.g. ~/.my.cnf).',
-        ) ?: $currentPassword;
+            hint: 'Leave empty to use the client config of the server user (e.g. ~/.my.cnf).',
+        );
 
         foreach (self::SETTINGS as $envKey => [$configKey]) {
             config()->set("db-snapshot.{$configKey}", $configKey === 'ssh.port' || $configKey === 'remote.port' ? (int) $values[$envKey] : $values[$envKey]);

@@ -96,7 +96,7 @@ it('offers the chosen driver\'s default port and user', function () {
     Process::assertRan(fn ($process) => str_contains(commandLine($process), 'psql') && str_contains(commandLine($process), '--port=5432'));
 });
 
-it('goes through every step again with --fresh', function () {
+it('re-analyzes and opens the profile editor with --fresh, keeping the connection settings', function () {
     Process::fake([
         '*SELECT VERSION()*' => Process::result('8.4.8'),
         '*information_schema.TABLES*' => Process::result("orders\tBASE TABLE\t10\t1000\t0"),
@@ -107,18 +107,7 @@ it('goes through every step again with --fresh', function () {
     (new Analysis('production', now()->toImmutable(), []))->save($this->workspace.'/analysis.json');
 
     $this->artisan('snapshot', ['--fresh' => true])
-        ->expectsOutputToContain('Check the connection settings; Enter keeps the current value.')
-        ->expectsChoice('Database driver', 'mysql', ['mysql' => 'mysql', 'pgsql' => 'pgsql'])
-        ->expectsQuestion('SSH host', 'db.example.test')
-        ->expectsQuestion('SSH user', 'deploy')
-        ->expectsQuestion('SSH port', '2222')
-        ->expectsQuestion('Path to the SSH private key (as seen by this machine)', '/keys/snapshot')
-        ->expectsQuestion('Database host, as seen from the server', '127.0.0.1')
-        ->expectsQuestion('Database port', '3306')
-        ->expectsQuestion('Database user', 'reader')
-        ->expectsQuestion('Database to snapshot', 'production')
-        ->expectsQuestion('Database password', '')
-        ->expectsConfirmation("Save these settings to {$this->app->environmentFilePath()}?", 'no')
+        ->expectsOutputToContain('Connected: mysql 8.4.8')
         ->expectsQuestion('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', 'orders')
         ->expectsChoice('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', ['orders'], ['orders' => 'orders · 1000 B · ~10 rows'])
         ->expectsChoice('orders (1000 B, ~10 rows)', 'full', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
@@ -126,6 +115,5 @@ it('goes through every step again with --fresh', function () {
         ->expectsConfirmation('Pull a snapshot with profile [default] now?', 'no')
         ->assertSuccessful();
 
-    expect(config('db-snapshot.remote.password'))->toBe('s3cret');
     Process::assertRan(fn ($process) => str_contains(commandLine($process), 'information_schema.COLUMNS'));
 });
