@@ -3,7 +3,6 @@
 namespace Overthink\DbSnapshot\Commands;
 
 use Illuminate\Console\Command;
-use Illuminate\Contracts\Process\ProcessResult;
 use Illuminate\Support\Facades\File;
 use Overthink\DbSnapshot\Analysis\Analyzer;
 use Overthink\DbSnapshot\Analysis\TableInfo;
@@ -24,13 +23,15 @@ use function Laravel\Prompts\warning;
 class RefreshTableCommand extends Command
 {
     use AsksTableRules;
+    use ChoosesProfile;
+    use TargetsLocalDatabase;
     use UsesAnalysis;
 
     protected $signature = 'snapshot:refresh-table
         {tables?* : Tables to refresh (asked when omitted)}
-        {--profile=default : Profile whose rules are the defaults}
+        {--profile= : Profile whose rules are the defaults (asked when there are several)}
         {--database= : Refresh tables in this database instead of the connection\'s own}
-        {--parallel= : Parallel sessions (default: config db-snapshot.parallel)}
+        {--parallel= : How many tables to dump and import at a time (default: SNAPSHOT_PARALLEL)}
         {--keep : Keep the pulled files in the snapshot directory}
         {--force : Do not ask before replacing the tables}
         {--analyze : Re-read the remote database first}';
@@ -39,9 +40,7 @@ class RefreshTableCommand extends Command
 
     public function handle(Analyzer $analyzer, Puller $puller, Restorer $restorer): int
     {
-        if ($this->laravel->isProduction()) {
-            error('snapshot:refresh-table never runs in production.');
-
+        if ($this->refusesProduction()) {
             return self::FAILURE;
         }
 
@@ -97,18 +96,17 @@ class RefreshTableCommand extends Command
             return self::SUCCESS;
         }
 
-        $connectionName = config('db-snapshot.connection') ?? config('database.default');
-        $connection = config("database.connections.{$connectionName}");
+        $connection = $this->localConnection();
         $connection['database'] = $this->option('database') ?: $connection['database'];
 
         if (! $this->option('force') && ! confirm('Replace '.implode(', ', array_keys($rules))." in {$connection['database']}?", default: false)) {
+            info('Nothing changed.');
+
             return self::FAILURE;
         }
 
-        $parallel = (int) ($this->option('parallel') ?: config('db-snapshot.parallel'));
-        $report = function (string $key, ProcessResult $result, float $seconds): void {
-            $this->line(sprintf('  %s %-40s %6.1fs', $result->successful() ? '<info>✓</info>' : '<error>✗</error>', $key, $seconds));
-        };
+        $parallel = $this->parallel();
+        $report = $this->progressReporter();
 
         $snapshot = null;
         $warnings = [];
@@ -137,10 +135,14 @@ class RefreshTableCommand extends Command
 
     private function profile(): Profile
     {
-        $name = (string) $this->option('profile');
+        $name = $this->chooseProfile($this->option('profile'));
 
-        return File::exists(Profile::path(config('db-snapshot.profile_path'), $name))
-            ? Profile::load(config('db-snapshot.profile_path'), $name)
-            : new Profile($name);
+        if (File::exists(Profile::path(config('db-snapshot.profile_path'), $name))) {
+            return Profile::load(config('db-snapshot.profile_path'), $name);
+        }
+
+        note("Profile [{$name}] doesn't exist, so tables start from a full copy.");
+
+        return new Profile($name);
     }
 }

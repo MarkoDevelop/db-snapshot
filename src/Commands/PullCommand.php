@@ -3,7 +3,6 @@
 namespace Overthink\DbSnapshot\Commands;
 
 use Illuminate\Console\Command;
-use Illuminate\Contracts\Process\ProcessResult;
 use Illuminate\Support\Facades\File;
 use Overthink\DbSnapshot\Analysis\Analyzer;
 use Overthink\DbSnapshot\Profile\Profile;
@@ -17,12 +16,13 @@ use function Laravel\Prompts\note;
 
 class PullCommand extends Command
 {
+    use ChoosesProfile;
     use Formats;
     use UsesAnalysis;
 
     protected $signature = 'snapshot:pull
-        {--profile=default : Profile to pull}
-        {--parallel= : Parallel SSH sessions (default: config db-snapshot.parallel)}
+        {--profile= : Profile to pull (asked when there are several)}
+        {--parallel= : How many tables to dump at a time (default: SNAPSHOT_PARALLEL)}
         {--analyze : Re-read the remote database first}';
 
     protected $description = 'Stream a snapshot of the remote database into the local snapshot directory';
@@ -31,12 +31,12 @@ class PullCommand extends Command
     {
         $startedAt = microtime(true);
         $lastReport = $startedAt;
-        $parallel = (int) ($this->option('parallel') ?: config('db-snapshot.parallel'));
+        $parallel = $this->parallel();
 
         try {
             $analysis = $this->analysis($analyzer, required: false);
 
-            $profileName = (string) $this->option('profile');
+            $profileName = $this->chooseProfile($this->option('profile'));
 
             if (! file_exists(Profile::path(config('db-snapshot.profile_path'), $profileName))
                 && $this->input->isInteractive()
@@ -62,9 +62,7 @@ class PullCommand extends Command
             $snapshot = $puller->pull(
                 $profile,
                 $parallel,
-                function (string $key, ProcessResult $result, float $seconds): void {
-                    $this->line(sprintf('  %s %-40s %6.1fs', $result->successful() ? '<info>✓</info>' : '<error>✗</error>', $key, $seconds));
-                },
+                $this->progressReporter(),
                 function (array $running, string $directory) use (&$lastReport): void {
                     if (microtime(true) - $lastReport < 15) {
                         return;

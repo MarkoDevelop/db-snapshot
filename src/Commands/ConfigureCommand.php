@@ -31,10 +31,12 @@ use function Laravel\Prompts\warning;
 class ConfigureCommand extends Command
 {
     use AsksTableRules;
+    use ChoosesProfile;
     use UsesAnalysis;
 
     protected $signature = 'snapshot:configure
-        {profile=default : Profile name (saved as <profile>.json)}
+        {profile? : Profile name (asked when there are several; saved as <profile>.json)}
+        {--profile= : The same as the profile argument}
         {--analyze : Re-read the remote database first}';
 
     protected $description = 'Choose which tables a snapshot contains and how much of each';
@@ -49,47 +51,40 @@ class ConfigureCommand extends Command
             return self::FAILURE;
         }
 
-        $profileName = (string) $this->argument('profile');
+        $profileName = $this->chooseProfile($this->argument('profile') ?: $this->option('profile'), allowNew: true);
         $profileDirectory = config('db-snapshot.profile_path');
         $existing = File::exists(Profile::path($profileDirectory, $profileName))
             ? Profile::load($profileDirectory, $profileName)
             : new Profile($profileName);
 
         $rules = $this->existingRules($existing, $analysis);
-        $largeBytes = (int) config('db-snapshot.large_table_mb') * 1024 * 1024;
+        $largeMb = (int) config('db-snapshot.large_table_mb');
         $baseTables = array_filter($analysis->tables, fn (TableInfo $table): bool => ! $table->isView);
 
-        $large = array_filter($baseTables, fn (TableInfo $table): bool => $table->bytes() >= $largeBytes);
-        $selected = $large === [] ? [] : multiselect(
-            label: 'Large tables that should NOT be copied in full',
-            options: array_map(fn (TableInfo $table): string => $this->tableLabel($table, $rules[$table->name] ?? null), $large),
-            default: array_values(array_intersect(array_keys($large), array_keys($rules))),
+        // Large tables and tables that already have a rule, with the rules preselected.
+        $listed = array_filter($baseTables, fn (TableInfo $table): bool => $table->bytes() >= $largeMb * 1024 * 1024 || isset($rules[$table->name]));
+        $selected = $listed === [] ? [] : multiselect(
+            label: 'Tables that should NOT be copied in full',
+            options: array_map(fn (TableInfo $table): string => $this->tableLabel($table, $rules[$table->name] ?? null), $listed),
+            default: array_values(array_intersect(array_keys($listed), array_keys($rules))),
             scroll: 15,
-            hint: 'Space to toggle. Unselected tables are copied in full.',
+            hint: "Tables of {$largeMb} MB or more and tables with rules. Space to toggle; unselected ones are copied in full.",
         );
 
-        if ($large === []) {
-            note('No table is '.config('db-snapshot.large_table_mb').' MB or larger.');
+        if ($listed === []) {
+            note("No table is {$largeMb} MB or larger.");
         }
 
-        $others = array_diff_key($baseTables, $large);
-        $selected = [...$selected, ...multisearch(
-            label: 'Any smaller tables to filter, empty or skip? (type to search, Enter for none)',
+        $others = array_diff_key($baseTables, $listed);
+        $selected = [...$selected, ...($others === [] ? [] : multisearch(
+            label: 'Any other tables to filter, empty or skip? (type to search, Enter for none)',
             options: fn (string $search): array => array_map(
-                fn (TableInfo $table): string => $this->tableLabel($table, $rules[$table->name] ?? null),
+                fn (TableInfo $table): string => $this->tableLabel($table, null),
                 array_filter($others, fn (TableInfo $table): bool => $search === '' || str_contains($table->name, $search)),
             ),
             placeholder: 'e.g. failed_jobs',
             scroll: 15,
-        )];
-
-        $smallWithRules = array_intersect_key($rules, $others);
-
-        if ($smallWithRules !== [] && confirm(
-            label: 'Keep the existing rules for '.implode(', ', array_keys($smallWithRules)).'?',
-        )) {
-            $selected = array_values(array_unique([...$selected, ...array_keys($smallWithRules)]));
-        }
+        ))];
 
         $newRules = [];
 
@@ -107,7 +102,7 @@ class ConfigureCommand extends Command
         $saveAs = $this->askProfileName($profileDirectory, $profileName);
 
         if ($saveAs === null) {
-            warning('Nothing saved.');
+            info('Nothing changed.');
 
             return self::FAILURE;
         }

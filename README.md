@@ -82,7 +82,15 @@ The remote password goes to the SSH session's stdin and is exported there (as `M
 
 ## Profiles
 
-`snapshot:configure [profile]` writes `database/snapshot-profiles/<profile>.json`:
+`snapshot:configure [profile]` writes `database/snapshot-profiles/<profile>.json`.
+
+Every command takes `--profile=` (`snapshot:configure` also accepts the name as an argument). Without one:
+- with several saved profiles, the command asks **Which profile?**, with `default` preselected. `snapshot` and `snapshot:configure` also offer **New profile…** there.
+- with one profile, it's used without asking.
+- with none, `default` is used.
+- run with `--no-interaction`, `default` is always used.
+
+A profile looks like this:
 
 ```json
 {
@@ -108,7 +116,7 @@ The remote password goes to the SSH session's stdin and is exported there (as `M
 
 Tables the profile doesn't list use `default_mode`, so a new table on the server is never silently dropped. `months` is relative, so a profile stays current without editing.
 
-In `snapshot:configure`, large tables (over `large_table_mb`, 200 MB by default) are listed first with their size, row count and indexed date columns. Any other table can be found by typing its name. For `recent` rules, each period option shows an estimated size, and a summary table shows the expected snapshot size before you save.
+In `snapshot:configure`, large tables (over `large_table_mb`, 200 MB by default) and tables that already have a rule are listed first, with their size, row count and indexed date columns. Existing rules are preselected. Any other table can be found by typing its name. For `recent` rules, each period option shows an estimated size, and a summary table shows the expected snapshot size before you save.
 
 At the end you choose the name to save under, so one run can turn `default` into a new `nightly` profile. A different existing profile is only overwritten after you confirm.
 

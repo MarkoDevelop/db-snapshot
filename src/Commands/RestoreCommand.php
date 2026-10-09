@@ -3,7 +3,6 @@
 namespace Overthink\DbSnapshot\Commands;
 
 use Illuminate\Console\Command;
-use Illuminate\Contracts\Process\ProcessResult;
 use Overthink\DbSnapshot\Snapshot\Restorer;
 use Overthink\DbSnapshot\Snapshot\Snapshot;
 use Overthink\DbSnapshot\Snapshot\SnapshotRepository;
@@ -22,28 +21,26 @@ use function Laravel\Prompts\warning;
 class RestoreCommand extends Command
 {
     use Formats;
+    use TargetsLocalDatabase;
 
     protected $signature = 'snapshot:restore
         {snapshot? : Snapshot directory name, or "latest" (asked when omitted; the newest is preselected)}
         {--profile= : Only snapshots of this profile}
         {--database= : Restore into this database instead of the connection\'s own (placeholders like source, profile and date in braces work, see the README)}
-        {--parallel= : Parallel database clients (default: config db-snapshot.parallel)}
+        {--parallel= : How many tables to import at a time (default: SNAPSHOT_PARALLEL)}
         {--force : Do not ask before dropping the database}';
 
     protected $description = 'Drop the local database and recreate it from a snapshot';
 
     public function handle(SnapshotRepository $snapshots, Restorer $restorer): int
     {
-        if ($this->laravel->isProduction()) {
-            error('snapshot:restore never runs in production.');
-
+        if ($this->refusesProduction()) {
             return self::FAILURE;
         }
 
-        $connectionName = config('db-snapshot.connection') ?? config('database.default');
-        $connection = config("database.connections.{$connectionName}");
+        $connection = $this->localConnection();
         $appDatabase = (string) $connection['database'];
-        $parallel = (int) ($this->option('parallel') ?: config('db-snapshot.parallel'));
+        $parallel = $this->parallel();
 
         try {
             $snapshot = $this->chooseSnapshot($snapshots, $this->option('profile') ?: null);
@@ -65,15 +62,15 @@ class RestoreCommand extends Command
         $target = "{$connection['database']} on {$connection['host']}:{$connection['port']}";
 
         if (! $this->option('force') && ! confirm("Drop and recreate {$target}?", default: false)) {
+            info('Nothing changed.');
+
             return self::FAILURE;
         }
 
         $startedAt = microtime(true);
 
         try {
-            $warnings = $restorer->restore($snapshot, $connection, $parallel, function (string $table, ProcessResult $result, float $seconds): void {
-                $this->line(sprintf('  %s %-40s %6.1fs', $result->successful() ? '<info>✓</info>' : '<error>✗</error>', $table, $seconds));
-            });
+            $warnings = $restorer->restore($snapshot, $connection, $parallel, $this->progressReporter());
         } catch (Throwable $exception) {
             error($exception->getMessage());
 

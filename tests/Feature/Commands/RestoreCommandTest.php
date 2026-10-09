@@ -28,6 +28,7 @@ it('does not drop the database when the confirmation is declined', function () {
             'other' => 'Another name…',
         ])
         ->expectsConfirmation('Drop and recreate dev_wt on mysql:3306?', 'no')
+        ->expectsOutputToContain('Nothing changed.')
         ->assertFailed();
 
     Process::assertNothingRan();

@@ -2,8 +2,31 @@
 
 namespace Overthink\DbSnapshot\Commands;
 
+use Closure;
+use Illuminate\Contracts\Process\ProcessResult;
+
 trait Formats
 {
+    /**
+     * Prints one "✓ table  1.2s" line per finished dump or import.
+     *
+     * @return Closure(string, ProcessResult, float): void
+     */
+    protected function progressReporter(): Closure
+    {
+        return function (string $key, ProcessResult $result, float $seconds): void {
+            $this->line(sprintf('  %s %-40s %6.1fs', $result->successful() ? '<info>✓</info>' : '<error>✗</error>', $key, $seconds));
+        };
+    }
+
+    /**
+     * --parallel, or SNAPSHOT_PARALLEL.
+     */
+    protected function parallel(): int
+    {
+        return max(1, (int) ($this->option('parallel') ?: config('db-snapshot.parallel')));
+    }
+
     protected function formatBytes(int|float $bytes): string
     {
         $units = ['B', 'KB', 'MB', 'GB', 'TB'];
