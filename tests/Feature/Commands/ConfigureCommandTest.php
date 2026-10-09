@@ -68,3 +68,21 @@ it('does not overwrite another existing profile without asking', function () {
 
     expect(File::get($this->workspace.'/profiles/nightly.json'))->toBe('{"default_mode":"schema","tables":{}}');
 });
+
+it('skips the large tables question when no table is large', function () {
+    Process::fake();
+    app()->useDatabasePath($this->workspace.'/database');
+    (new Analysis('production', now()->toImmutable(), [
+        'users' => new TableInfo('users', false, 10, 1024 * 1024, 0),
+    ]))->save($this->workspace.'/analysis.json');
+
+    $this->artisan('snapshot:configure')
+        ->expectsOutputToContain('No table is 100 MB or larger.')
+        ->expectsQuestion('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', 'users')
+        ->expectsChoice('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', ['users'], ['users' => 'users · 1.0 MB · ~10 rows'])
+        ->expectsChoice('users (1.0 MB, ~10 rows)', 'schema', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
+        ->expectsQuestion('Save as profile', 'default')
+        ->assertSuccessful();
+
+    expect(Profile::load($this->workspace.'/profiles', 'default')->ruleFor('users')->describe())->toBe('schema');
+});

@@ -18,6 +18,7 @@ use function Laravel\Prompts\error;
 use function Laravel\Prompts\info;
 use function Laravel\Prompts\multisearch;
 use function Laravel\Prompts\multiselect;
+use function Laravel\Prompts\note;
 use function Laravel\Prompts\table;
 use function Laravel\Prompts\text;
 use function Laravel\Prompts\warning;
@@ -54,13 +55,17 @@ class ConfigureCommand extends Command
         $baseTables = array_filter($analysis->tables, fn (TableInfo $table): bool => ! $table->isView);
 
         $large = array_filter($baseTables, fn (TableInfo $table): bool => $table->bytes() >= $largeBytes);
-        $selected = multiselect(
+        $selected = $large === [] ? [] : multiselect(
             label: 'Large tables that should NOT be copied in full',
             options: array_map(fn (TableInfo $table): string => $this->tableLabel($table, $rules[$table->name] ?? null), $large),
             default: array_values(array_intersect(array_keys($large), array_keys($rules))),
             scroll: 15,
             hint: 'Space to toggle. Unselected tables are copied in full.',
         );
+
+        if ($large === []) {
+            note('No table is '.config('db-snapshot.large_table_mb').' MB or larger.');
+        }
 
         $others = array_diff_key($baseTables, $large);
         $selected = [...$selected, ...multisearch(
