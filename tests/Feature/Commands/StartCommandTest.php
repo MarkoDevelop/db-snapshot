@@ -5,6 +5,7 @@ use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Sleep;
 use Overthink\DbSnapshot\Analysis\Analysis;
 use Overthink\DbSnapshot\Profile\Profile;
+use Overthink\DbSnapshot\Profile\TableMode;
 use Overthink\DbSnapshot\Snapshot\SnapshotRepository;
 
 it('explains which settings are missing when not interactive', function () {
@@ -93,4 +94,26 @@ it('offers the chosen driver\'s default port and user', function () {
         ->assertFailed();
 
     Process::assertRan(fn ($process) => str_contains(commandLine($process), 'psql') && str_contains(commandLine($process), '--port=5432'));
+});
+
+it('re-analyzes and opens the profile editor with --fresh, keeping the connection settings', function () {
+    Process::fake([
+        '*SELECT VERSION()*' => Process::result('8.4.8'),
+        '*information_schema.TABLES*' => Process::result("orders\tBASE TABLE\t10\t1000\t0"),
+        '*' => Process::result(),
+    ]);
+    app()->useDatabasePath($this->workspace.'/database');
+    (new Profile('default'))->save($this->workspace.'/profiles');
+    (new Analysis('production', now()->toImmutable(), []))->save($this->workspace.'/analysis.json');
+
+    $this->artisan('snapshot', ['--fresh' => true])
+        ->expectsOutputToContain('Connected: mysql 8.4.8')
+        ->expectsQuestion('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', 'orders')
+        ->expectsChoice('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', ['orders'], ['orders' => 'orders · 1000 B · ~10 rows'])
+        ->expectsChoice('orders (1000 B, ~10 rows)', 'full', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
+        ->expectsQuestion('Save as profile', 'default')
+        ->expectsConfirmation('Pull a snapshot with profile [default] now?', 'no')
+        ->assertSuccessful();
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'information_schema.COLUMNS'));
 });

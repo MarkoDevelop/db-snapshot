@@ -27,7 +27,8 @@ class StartCommand extends Command
 
     protected $signature = 'snapshot
         {--profile=default : Profile to use}
-        {--analyze : Re-read the remote database}';
+        {--analyze : Re-read the remote database}
+        {--fresh : Re-analyze the remote database and edit the profile, even if both exist}';
 
     protected $description = 'Guided setup: connect, analyze, configure a profile, pull and restore';
 
@@ -88,6 +89,11 @@ class StartCommand extends Command
         }
 
         return $this->call('snapshot:restore', ['snapshot' => 'latest', '--profile' => $profile, '--force' => true]);
+    }
+
+    protected function forceAnalyze(): bool
+    {
+        return $this->option('analyze') || $this->option('fresh');
     }
 
     private function ensureConnectionSettings(): bool
@@ -175,7 +181,7 @@ class StartCommand extends Command
     {
         $exists = file_exists(Profile::path(config('db-snapshot.profile_path'), $profile));
 
-        $edit = ! $exists || select(
+        $edit = ! $exists || $this->option('fresh') || select(
             label: "Profile [{$profile}] exists. What now?",
             options: ['use' => 'Use it as it is', 'edit' => 'Edit it first'],
         ) === 'edit';

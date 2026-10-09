@@ -21,15 +21,6 @@ function prepareConfigure(string $workspace): void
     app()->useDatabasePath($workspace.'/database');
 }
 
-/**
- * @param  list<TableMode>  $modes
- * @return array<string, string>
- */
-function modeOptions(array $modes): array
-{
-    return array_combine(array_map(fn (TableMode $mode) => $mode->value, $modes), array_map(fn (TableMode $mode) => $mode->label(), $modes));
-}
-
 function configureEventLogs($command, string $saveAs)
 {
     return $command

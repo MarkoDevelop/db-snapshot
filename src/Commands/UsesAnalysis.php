@@ -24,7 +24,7 @@ trait UsesAnalysis
         $maxAgeDays = (int) config('db-snapshot.analysis_max_age_days');
         $analysis = Analysis::load($path);
 
-        if ($this->option('analyze') || ($analysis === null && $required)) {
+        if ($this->forceAnalyze() || ($analysis === null && $required)) {
             return $this->analyzeNow($analyzer, $path);
         }
 
@@ -57,6 +57,11 @@ trait UsesAnalysis
         );
 
         return $choice === 'analyze' ? $this->analyzeNow($analyzer, $path) : $analysis;
+    }
+
+    protected function forceAnalyze(): bool
+    {
+        return (bool) $this->option('analyze');
     }
 
     private function analyzeNow(Analyzer $analyzer, string $path): Analysis
