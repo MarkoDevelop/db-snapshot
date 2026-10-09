@@ -217,7 +217,7 @@ php artisan snapshot:restore 2026-10-08_120000_default --database=dev_other
 
 `snapshot:refresh` asks what to refresh:
 
-- **a profile:** pulls a new snapshot with it and restores the whole database (`--profile=nightly` skips the question);
+- **a profile:** pulls a new snapshot with it and restores the whole database (`--profile=nightly` skips the question). Every question comes first: which profile, which database to restore into, the drop confirmation, and whether to point the app at a new database. After that it pulls and restores without stopping. `--force` asks nothing and restores into the app's database;
 - **some tables:** hands over to `snapshot:refresh-table`.
 
 `snapshot:refresh-table [tables...]` pulls only the given tables (or the ones you pick in a search) and replaces just those tables in your local database. Nothing else is dropped. Each table starts from its rule in the profile (`--profile=`), and you can change the rule for this run. The pulled files are deleted afterwards unless you pass `--keep`, and such partial pulls are never used by `snapshot:restore`.
@@ -241,7 +241,7 @@ php artisan snapshot:restore latest --database='{source}_{date}'    # e.g. produ
 | `{date}` / `{time}` | when it was pulled (`Y_m_d` / `His`) |
 | `{database}` | the connection's own database (`DB_DATABASE`) |
 
-Run interactively without `--database` or `--force`, `snapshot:restore` asks where to restore: the app's database, a new one named from `SNAPSHOT_DATABASE_NAME` (default `{source}_{date}`), or another name. After restoring into another database it offers to point the app at it by setting `DB_DATABASE` in `.env`.
+Run interactively without `--database` or `--force`, `snapshot:restore` asks where to restore: the app's database, a new one named from `SNAPSHOT_DATABASE_NAME` (default `{source}_{date}`), or another name. After restoring into another database it offers to point the app at it by setting `DB_DATABASE` in `.env`. `--switch-app` does that without asking.
 
 `snapshot:restore` refuses to run in the `production` environment.
 
