@@ -18,6 +18,7 @@ function fakeRemoteSchema(): void
         '*IS_NULLABLE*' => Process::result(implode("\n", [
             "event_logs\tid\tbigint\tNULL\tauto_increment\tPRI\tNO",
             "event_logs\tmessage\tvarchar\t191\t\t\tYES",
+            "event_logs\tuser_email\tvarchar\t191\t\t\tYES",
             "event_logs\tcreated_at\ttimestamp\tNULL\t\tMUL\tYES",
         ])),
         '*information_schema.COLUMNS*' => Process::result(implode("\n", [
@@ -82,3 +83,15 @@ it('records every column with what anonymizing needs to know', function () {
     expect($events->column('id')->toArray())->toMatchArray(['kind' => 'other', 'primary_key' => true, 'nullable' => false])
         ->and($events->column('message')->toArray())->toMatchArray(['kind' => 'text', 'max_length' => 191, 'nullable' => true]);
 });
+
+it('writes personal data suggestions only when anonymization is on', function (bool $enabled, array $expected) {
+    fakeRemoteSchema();
+    config()->set('db-snapshot.anonymize.enabled', $enabled);
+
+    $events = app(Analyzer::class)->analyze(100)->table('event_logs');
+
+    expect(array_map(fn ($rule) => $rule->toJson(), $events->personalData))->toBe($expected);
+})->with([
+    'on' => [true, ['user_email' => 'email']],
+    'off' => [false, []],
+]);

@@ -57,5 +57,6 @@ abstract class TestCase extends Orchestra
         $app['config']->set('db-snapshot.analysis_path', $this->workspace.'/analysis.json');
         $app['config']->set('db-snapshot.large_table_mb', 100);
         $app['config']->set('db-snapshot.analysis_max_age_days', 30);
+        $app['config']->set('db-snapshot.anonymize.enabled', true);
     }
 }

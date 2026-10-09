@@ -74,6 +74,7 @@ SNAPSHOT_PATH=/var/snapshots        # default: storage/db-snapshots
 SNAPSHOT_PARALLEL=4
 SNAPSHOT_CONNECTION=                # restore target, default: the app's default connection
 SNAPSHOT_DATABASE_NAME={source}_{date}   # name offered for a new database per snapshot
+SNAPSHOT_ANONYMIZE=false                 # replace personal data while pulling (see below)
 SNAPSHOT_ANONYMIZE_SALT=                 # same fakes in every snapshot when set
 ```
 
@@ -123,7 +124,15 @@ Filtering by date leaves rows in other tables that point at rows not copied. Res
 
 ## Anonymizing personal data
 
-Columns can be replaced while the dump runs on the server, so real names, emails or phone numbers never leave it, and snapshot files are safe to keep around. For an orders table you keep the order number, totals and dates, and drop who placed the order:
+Off by default. Turn it on per project with:
+
+```dotenv
+SNAPSHOT_ANONYMIZE=true
+```
+
+While it's off, `snapshot:configure` has no anonymize step, `snapshot:analyze` writes no suggestions, and `snapshot:pull` copies every table as it is. If the profile has anonymize rules, pull says which tables it copied unchanged. The rules stay in the profile for when it's switched on.
+
+With it on, columns can be replaced while the dump runs on the server, so real names, emails or phone numbers never leave it, and snapshot files are safe to keep around. For an orders table you keep the order number, totals and dates, and drop who placed the order:
 
 ```json
 "orders": {
@@ -153,7 +162,12 @@ Columns can be replaced while the dump runs on the server, so real names, emails
 - `email`, `hash`, `template` and `empty` need text columns. Other columns can use `null` (if nullable) or `fixed`.
 - `snapshot:pull` checks every rule against the real columns before dumping anything and lists all problems at once.
 
-`snapshot:configure` suggests columns by name (emails, person names, phones, street addresses, IPs, IBANs, tokens…) in a pre-selected list, and lets you search for any other column.
+`snapshot:analyze` looks for columns that seem personal by name (emails, person names, phones, street addresses, IPs, IBANs, tokens…) and writes them, with a suggested replacement, to `personal_data` in `snapshot-analysis.json`. They're only suggestions. The profile decides what's anonymized:
+
+- `snapshot:configure` lists the suggestions. New ones are pre-checked, and you can search for any other column.
+- Suggestions you uncheck go to the profile's `not_personal` list (`"not_personal": ["products.name"]`), so they aren't treated as new again. They still show up, unchecked, if you change your mind.
+- `snapshot:analyze` and `snapshot:pull` warn about suggested columns the profile neither anonymizes nor lists in `not_personal`, e.g. after a migration added `orders.customer_phone`.
+- Hand edits to the profile always win. Your own strategy for a column is kept, rules for columns that no longer exist are dropped by `snapshot:configure` with a warning, and a rule that can't work fails `snapshot:pull` before anything is dumped.
 
 Treat the suggestions as a starting point. Personal data also hides in free-text notes, JSON columns, logs and audit tables, so review what you copy.
 

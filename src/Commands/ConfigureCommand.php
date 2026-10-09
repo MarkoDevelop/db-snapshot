@@ -97,9 +97,12 @@ class ConfigureCommand extends Command
             $newRules[$tableName] = $this->askRule($analysis->tables[$tableName], $rules[$tableName] ?? null);
         }
 
-        $newRules = $this->askAnonymize($analysis, $existing->defaultMode, $newRules, $rules);
+        $notPersonal = $existing->notPersonal;
+        $newRules = config('db-snapshot.anonymize.enabled')
+            ? $this->askAnonymize($analysis, $existing->defaultMode, $newRules, $rules, $notPersonal)
+            : $this->keepAnonymize($existing->defaultMode, $newRules, $rules);
 
-        $this->summary($analysis, new Profile($profileName, $existing->defaultMode, $newRules));
+        $this->summary($analysis, new Profile($profileName, $existing->defaultMode, $newRules, $notPersonal));
 
         $saveAs = $this->askProfileName($profileDirectory, $profileName);
 
@@ -109,7 +112,7 @@ class ConfigureCommand extends Command
             return self::FAILURE;
         }
 
-        $profile = new Profile($saveAs, $existing->defaultMode, $newRules);
+        $profile = new Profile($saveAs, $existing->defaultMode, $newRules, $notPersonal);
         info('Saved '.$profile->save($profileDirectory).". Pull it with: php artisan snapshot:pull --profile={$saveAs}");
 
         $this->offerIndexMigration($profile, $analysis);
@@ -121,11 +124,15 @@ class ConfigureCommand extends Command
      * Pick the columns whose values are replaced on the server, starting from
      * what the profile anonymized before plus name-based suggestions.
      *
+     * Suggestions that are left unchecked go to $notPersonal, so they are
+     * not suggested as new again.
+     *
      * @param  array<string, TableRule>  $newRules
      * @param  array<string, TableRule>  $previousRules
+     * @param  list<string>  $notPersonal  table.column entries judged fine to copy; updated in place
      * @return array<string, TableRule>
      */
-    private function askAnonymize(Analysis $analysis, TableMode $defaultMode, array $newRules, array $previousRules): array
+    private function askAnonymize(Analysis $analysis, TableMode $defaultMode, array $newRules, array $previousRules, array &$notPersonal): array
     {
         $copied = [];
 
@@ -157,8 +164,16 @@ class ConfigureCommand extends Command
         $candidates = [];
 
         foreach ($copied as $name => $table) {
+            foreach (array_keys($previous[$name] ?? []) as $column) {
+                if ($table->column($column) === null) {
+                    warning("Dropping the anonymize rule for {$name}.{$column}: the column no longer exists.");
+                }
+            }
+
             foreach ($table->columns as $column) {
-                $rule = $previous[$name][$column->name] ?? PersonalDataColumns::suggest($name, $column);
+                $rule = $previous[$name][$column->name]
+                    ?? $table->personalData[$column->name]
+                    ?? ($table->personalData === [] ? PersonalDataColumns::suggest($name, $column) : null);
 
                 if ($rule !== null) {
                     $candidates["{$name}.{$column->name}"] = $rule;
@@ -170,11 +185,18 @@ class ConfigureCommand extends Command
             label: 'Anonymize these columns (personal data)',
             options: array_combine(
                 array_keys($candidates),
-                array_map(fn (string $key, ColumnRule $rule): string => "{$key} → {$rule->describe()}", array_keys($candidates), $candidates),
+                array_map(
+                    fn (string $key, ColumnRule $rule): string => "{$key} → {$rule->describe()}".(in_array($key, $notPersonal, true) ? ' (marked not personal)' : ''),
+                    array_keys($candidates),
+                    $candidates,
+                ),
             ),
-            default: $previous === [] ? array_keys($candidates) : array_values(array_intersect(array_keys($candidates), $previousKeys)),
+            default: array_values(array_filter(
+                array_keys($candidates),
+                fn (string $key): bool => in_array($key, $previousKeys, true) || ! in_array($key, $notPersonal, true),
+            )),
             scroll: 15,
-            hint: 'Replaced on the server while dumping, so real values never leave it.',
+            hint: 'Replaced on the server while dumping. Unchecked ones are remembered as not personal.',
         );
 
         $others = [];
@@ -204,6 +226,11 @@ class ConfigureCommand extends Command
             scroll: 15,
         );
 
+        $notPersonal = array_values(array_unique([
+            ...array_diff($notPersonal, array_keys($candidates)),
+            ...array_diff(array_keys($candidates), $chosen),
+        ]));
+
         $anonymize = [];
 
         foreach ($chosen as $key) {
@@ -221,6 +248,27 @@ class ConfigureCommand extends Command
 
             if (($anonymize[$name] ?? []) !== [] || $rule->anonymize !== []) {
                 $newRules[$name] = $rule->withAnonymize($anonymize[$name] ?? []);
+            }
+        }
+
+        return $newRules;
+    }
+
+    /**
+     * With anonymization off the step is skipped, but rules already in the
+     * profile are kept, so switching it back on brings them back.
+     *
+     * @param  array<string, TableRule>  $newRules
+     * @param  array<string, TableRule>  $previousRules
+     * @return array<string, TableRule>
+     */
+    private function keepAnonymize(TableMode $defaultMode, array $newRules, array $previousRules): array
+    {
+        foreach ($previousRules as $name => $previous) {
+            $rule = $newRules[$name] ?? new TableRule($defaultMode);
+
+            if ($previous->anonymize !== [] && ! in_array($rule->mode, [TableMode::Schema, TableMode::Skip], true)) {
+                $newRules[$name] = $rule->withAnonymize($previous->anonymize);
             }
         }
 

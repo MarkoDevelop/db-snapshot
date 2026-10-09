@@ -124,12 +124,17 @@ return [
     | Anonymizing
     |--------------------------------------------------------------------------
     |
-    | Columns a profile anonymizes are replaced on the server while dumping.
+    | Off by default. When on, columns a profile anonymizes are replaced on
+    | the server while dumping, so the real values never leave it.
     | Hashes are salted: with a fixed salt the same value gets the same fake
     | in every snapshot; without one, a random salt is used per pull.
     |
     */
     'anonymize' => [
+        // Off: no anonymize step in snapshot:configure, no suggestions or
+        // warnings, and anonymize rules in profiles are ignored when pulling.
+        'enabled' => (bool) env('SNAPSHOT_ANONYMIZE', false),
+
         'salt' => env('SNAPSHOT_ANONYMIZE_SALT'),
     ],
 

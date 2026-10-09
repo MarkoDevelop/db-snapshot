@@ -6,8 +6,11 @@ use Overthink\DbSnapshot\Analysis\Analysis;
 use Overthink\DbSnapshot\Analysis\ColumnInfo;
 use Overthink\DbSnapshot\Analysis\DateColumn;
 use Overthink\DbSnapshot\Analysis\TableInfo;
+use Overthink\DbSnapshot\Profile\AnonymizeStrategy;
+use Overthink\DbSnapshot\Profile\ColumnRule;
 use Overthink\DbSnapshot\Profile\Profile;
 use Overthink\DbSnapshot\Profile\TableMode;
+use Overthink\DbSnapshot\Profile\TableRule;
 
 function prepareConfigure(string $workspace): void
 {
@@ -120,4 +123,60 @@ it('suggests personal data columns to anonymize and saves the choice', function 
             'number' => ['template' => 'Order {id}'],
         ],
     ]);
+});
+
+it('remembers unchecked suggestions as not personal and shows them unchecked next time', function () {
+    Process::fake();
+    app()->useDatabasePath($this->workspace.'/database');
+    (new Analysis('production', now()->toImmutable(), [
+        'companies' => new TableInfo('companies', false, 10, 1024, 0, columns: [
+            new ColumnInfo('id', 'int', primaryKey: true, nullable: false),
+            new ColumnInfo('email', 'varchar', ColumnInfo::TEXT, 191),
+        ], personalData: ['email' => new ColumnRule(AnonymizeStrategy::Email)]),
+    ]))->save($this->workspace.'/analysis.json');
+
+    $run = fn (bool $again) => $this->artisan('snapshot:configure')
+        ->expectsQuestion('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', 'companies')
+        ->expectsChoice('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', ['companies'], ['companies' => 'companies · 1.0 KB · ~10 rows'.($again ? ' · now: full' : '')])
+        ->when($again, fn ($command) => $command->expectsConfirmation('Keep the existing rules for companies?', 'yes'))
+        ->expectsChoice('companies (1.0 KB, ~10 rows)', 'full', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]));
+
+    $run(false)
+        ->expectsChoice('Anonymize these columns (personal data)', [], ['companies.email' => 'companies.email → email'])
+        ->expectsQuestion('Save as profile', 'default')
+        ->assertSuccessful();
+
+    expect(Profile::load($this->workspace.'/profiles', 'default')->notPersonal)->toBe(['companies.email']);
+
+    $run(true)
+        ->expectsChoice('Anonymize these columns (personal data)', ['companies.email'], ['companies.email' => 'companies.email → email (marked not personal)'])
+        ->expectsQuestion('Save as profile', 'default')
+        ->assertSuccessful();
+
+    $profile = Profile::load($this->workspace.'/profiles', 'default');
+
+    expect($profile->notPersonal)->toBe([])
+        ->and($profile->ruleFor('companies')->anonymize['email']->strategy)->toBe(AnonymizeStrategy::Email);
+});
+
+it('skips the anonymize step when anonymization is off and keeps existing rules', function () {
+    Process::fake();
+    config()->set('db-snapshot.anonymize.enabled', false);
+    app()->useDatabasePath($this->workspace.'/database');
+    (new Analysis('production', now()->toImmutable(), [
+        'companies' => new TableInfo('companies', false, 10, 1024, 0, columns: [
+            new ColumnInfo('email', 'varchar', ColumnInfo::TEXT, 191),
+        ], personalData: ['email' => new ColumnRule(AnonymizeStrategy::Email)]),
+    ]))->save($this->workspace.'/analysis.json');
+    (new Profile('default', tables: ['companies' => TableRule::fromArray(['mode' => 'full', 'anonymize' => ['email' => 'email']])]))->save($this->workspace.'/profiles');
+
+    $this->artisan('snapshot:configure')
+        ->expectsQuestion('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', 'companies')
+        ->expectsChoice('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', ['companies'], ['companies' => 'companies · 1.0 KB · ~10 rows · now: full, anonymizes email'])
+        ->expectsConfirmation('Keep the existing rules for companies?', 'yes')
+        ->expectsChoice('companies (1.0 KB, ~10 rows)', 'full', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
+        ->expectsQuestion('Save as profile', 'default')
+        ->assertSuccessful();
+
+    expect(Profile::load($this->workspace.'/profiles', 'default')->ruleFor('companies')->anonymize)->toHaveKey('email');
 });

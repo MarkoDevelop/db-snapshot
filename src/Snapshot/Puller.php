@@ -30,6 +30,7 @@ final class Puller
         private readonly ParallelRunner $runner,
         private readonly string $basePath,
         private readonly ?string $anonymizeSalt = null,
+        private readonly bool $anonymize = true,
     ) {}
 
     /**
@@ -75,7 +76,7 @@ final class Puller
             $jobs[$table->name] = $this->job($rule->anonymize !== [] && $anonymizer !== null
                 ? $anonymizer($table->name, $rule, $where, $file)
                 : $this->driver->dumpTableCommand($table->name, $rule->mode === TableMode::Schema, $where, $file));
-            $manifestTables[$table->name] = ['mode' => $rule->mode->value, 'where' => $where, 'file' => $file, 'anonymized' => array_keys($rule->anonymize)];
+            $manifestTables[$table->name] = ['mode' => $rule->mode->value, 'where' => $where, 'file' => $file, 'anonymized' => $anonymizer !== null ? array_keys($rule->anonymize) : []];
         }
 
         $dataTables = array_keys($manifestTables);
@@ -156,6 +157,10 @@ final class Puller
      */
     private function anonymizer(Profile $profile, array $tables): ?Closure
     {
+        if (! $this->anonymize) {
+            return null;
+        }
+
         $anonymizing = array_filter(
             array_map(fn (TableInfo $table): TableRule => $profile->ruleFor($table->name), $tables),
             fn (TableRule $rule): bool => $rule->anonymize !== [] && ! in_array($rule->mode, [TableMode::Schema, TableMode::Skip], true),

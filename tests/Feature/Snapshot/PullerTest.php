@@ -184,3 +184,14 @@ it('refuses to anonymize with a driver that cannot', function () {
         'orders' => TableRule::fromArray(['mode' => 'full', 'anonymize' => ['email' => 'email']]),
     ]), 1);
 })->throws(RuntimeException::class, "The fake driver can't anonymize columns");
+
+it('ignores anonymize rules when anonymization is off', function () {
+    fakeRemoteWithColumns();
+    config()->set('db-snapshot.anonymize.enabled', false);
+
+    $snapshot = app(Puller::class)->pull(anonymizingProfile(['customer_email' => 'email']), 1);
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'tables/orders.sql.gz') && ! str_contains(commandLine($process), 'SHA2('));
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'IS_NULLABLE'));
+    expect($snapshot->manifest['tables']['orders'])->not->toHaveKey('anonymized');
+});
