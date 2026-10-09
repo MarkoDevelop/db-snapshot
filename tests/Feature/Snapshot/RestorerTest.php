@@ -172,3 +172,21 @@ it('gives up on a table that keeps deadlocking', function () {
 
     Process::assertRanTimes(fn ($process) => str_contains(commandLine($process), 'users.sql.gz'), 4);
 });
+
+it('labels imports that collided and their retries in the progress report', function () {
+    Sleep::fake();
+    Process::fake([
+        '*users.sql.gz*' => Process::sequence()
+            ->push(Process::result(errorOutput: 'ERROR 1213 (40001) at line 34: Deadlock found', exitCode: 1))
+            ->push(Process::result()),
+        '*' => Process::result(),
+    ]);
+    $snapshot = makeSnapshot($this->workspace.'/snap', ['users' => 2, 'orders' => 1], withRoutines: false);
+    $reported = [];
+
+    app(Restorer::class)->restore($snapshot, localConnection(), 2, function (string $table, $result) use (&$reported) {
+        $reported[] = ($result->successful() ? '✓ ' : '✗ ').$table;
+    });
+
+    expect($reported)->toBe(['✗ users (lock conflict, retrying)', '✓ orders', '✓ users (retry 1)']);
+});
