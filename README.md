@@ -132,7 +132,7 @@ Filtering by date leaves rows in other tables that point at rows not copied. Res
 
 ```bash
 php artisan snapshot:pull --profile=default --parallel=6
-php artisan snapshot:restore                      # latest snapshot, asks before dropping
+php artisan snapshot:restore                      # pick a snapshot (newest preselected), asks before dropping
 php artisan snapshot:restore latest --profile=default --force
 php artisan snapshot:restore 2026-10-08_120000_default --database=dev_other
 ```
@@ -147,6 +147,8 @@ php artisan snapshot:restore 2026-10-08_120000_default --database=dev_other
 `snapshot:refresh-table [tables...]` pulls only the given tables (or the ones you pick in a search) and replaces just those tables in your local database. Nothing else is dropped. Each table starts from its rule in the profile (`--profile=`), and you can change the rule for this run. The pulled files are deleted afterwards unless you pass `--keep`, and such partial pulls are never used by `snapshot:restore`.
 
 A snapshot is a directory of `tables/<table>.sql.gz` files plus `_views.sql.gz`, `_routines.sql.gz` and `manifest.json`. It's written as `<name>.partial` and renamed only when every dump succeeds. A failed pull leaves nothing behind.
+
+Without a snapshot name, `snapshot:restore` lists the snapshots (filtered by `--profile=`), newest first and preselected, so Enter restores the latest. Pass a name or `latest`, or run it with `--no-interaction`, to skip the question.
 
 `snapshot:restore` refuses to run in the `production` environment.
 
