@@ -6,6 +6,7 @@ use Carbon\CarbonImmutable;
 use InvalidArgumentException;
 use Overthink\DbSnapshot\Analysis\DateColumn;
 use Overthink\DbSnapshot\Analysis\TableInfo;
+use Overthink\DbSnapshot\Contracts\RetriesConflictingImports;
 
 /**
  * PostgreSQL: the pg_catalog, pg_dump and psql on the server, psql locally.
@@ -16,7 +17,7 @@ use Overthink\DbSnapshot\Analysis\TableInfo;
  * is restored after all rows are in; foreign keys are created NOT VALID, so
  * rows that point at filtered-out rows don't stop the restore.
  */
-class PgsqlDriver extends SshDriver
+class PgsqlDriver extends SshDriver implements RetriesConflictingImports
 {
     /**
      * @param  array{host?: ?string, user?: ?string, port?: int, key?: ?string, options?: list<string>}  $ssh
@@ -232,6 +233,15 @@ class PgsqlDriver extends SshDriver
         ]);
 
         return ['bash', '-o', 'pipefail', '-c', 'gzip -dc '.escapeshellarg($file).' | '.$filter.' | '.$client];
+    }
+
+    /**
+     * DROP TABLE … CASCADE of tables that reference each other can deadlock
+     * when they are refreshed in parallel.
+     */
+    public function isLockConflict(string $errorOutput): bool
+    {
+        return str_contains($errorOutput, 'deadlock detected') || str_contains($errorOutput, 'lock timeout');
     }
 
     public function localEnvironment(array $connection): array

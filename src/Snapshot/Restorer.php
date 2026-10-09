@@ -8,6 +8,7 @@ use Illuminate\Process\PendingProcess;
 use Illuminate\Support\Facades\Process;
 use InvalidArgumentException;
 use Overthink\DbSnapshot\Contracts\Driver;
+use Overthink\DbSnapshot\Contracts\RetriesConflictingImports;
 use Overthink\DbSnapshot\DriverManager;
 use RuntimeException;
 
@@ -17,6 +18,8 @@ use RuntimeException;
  */
 final class Restorer
 {
+    private const CONFLICT_RETRIES = 3;
+
     public function __construct(
         private readonly ParallelRunner $runner,
         private readonly DriverManager $drivers,
@@ -63,6 +66,19 @@ final class Restorer
         }
 
         $results = $this->runner->run($jobs, $parallel, $onFinished);
+
+        // Imports that only collided with each other are retried one at a time.
+        for ($attempt = 1; $attempt <= self::CONFLICT_RETRIES; $attempt++) {
+            $conflicts = array_filter($results, fn (ProcessResult $result): bool => $result->failed()
+                && $driver instanceof RetriesConflictingImports
+                && $driver->isLockConflict($result->errorOutput()));
+
+            if ($conflicts === []) {
+                break;
+            }
+
+            $results = [...$results, ...$this->runner->run(array_intersect_key($jobs, $conflicts), 1, $onFinished)];
+        }
 
         $failed = array_filter($results, fn (ProcessResult $result): bool => $result->failed());
 
