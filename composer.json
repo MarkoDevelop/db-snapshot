@@ -1,0 +1,75 @@
+{
+    "name": "overthink/db-snapshot",
+    "description": "Pull filtered MySQL snapshots from a remote server over SSH and restore them into your local database.",
+    "keywords": [
+        "overthink",
+        "laravel",
+        "mysql",
+        "mysqldump",
+        "snapshot",
+        "ssh"
+    ],
+    "homepage": "https://github.com/MarkoDevelop/db-snapshot",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Marko Zagar",
+            "email": "marko.zagar@gmail.com",
+            "role": "Developer"
+        }
+    ],
+    "require": {
+        "php": "^8.3",
+        "illuminate/console": "^11.0 || ^12.0 || ^13.0",
+        "illuminate/contracts": "^11.0 || ^12.0 || ^13.0",
+        "illuminate/process": "^11.0 || ^12.0 || ^13.0",
+        "illuminate/support": "^11.0 || ^12.0 || ^13.0",
+        "laravel/prompts": "^0.3",
+        "nesbot/carbon": "^3.8.4",
+        "spatie/laravel-package-tools": "^1.93.2"
+    },
+    "require-dev": {
+        "larastan/larastan": "^3.9.3",
+        "laravel/pint": "^1.30",
+        "nunomaduro/collision": "^8.9",
+        "orchestra/testbench": "^9.0 || ^10.0 || ^11.2",
+        "pestphp/pest": "^3.0 || ^4.7 || ^5.0",
+        "phpstan/extension-installer": "^1.4.3",
+        "phpstan/phpstan-deprecation-rules": "^2.0",
+        "phpstan/phpstan-phpunit": "^2.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Overthink\\DbSnapshot\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Overthink\\DbSnapshot\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "post-autoload-dump": "@composer run prepare",
+        "prepare": "@php vendor/bin/testbench package:discover --ansi",
+        "analyse": "vendor/bin/phpstan analyse",
+        "test": "vendor/bin/pest",
+        "test-coverage": "vendor/bin/pest --coverage",
+        "format": "vendor/bin/pint"
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true,
+            "phpstan/extension-installer": true
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Overthink\\DbSnapshot\\DbSnapshotServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
