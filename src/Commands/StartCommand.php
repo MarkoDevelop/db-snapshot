@@ -66,9 +66,9 @@ class StartCommand extends Command
             return self::FAILURE;
         }
 
-        $profile = $this->chooseProfile($this->option('profile'), allowNew: true);
+        [$profile, $copyFrom] = $this->pickProfile($this->option('profile'), offerNew: true);
 
-        if (! $this->ensureProfile($profile)) {
+        if (! $this->ensureProfile($profile, $copyFrom)) {
             return self::FAILURE;
         }
 
@@ -179,7 +179,7 @@ class StartCommand extends Command
         return true;
     }
 
-    private function ensureProfile(string $profile): bool
+    private function ensureProfile(string $profile, ?string $copyFrom): bool
     {
         $exists = file_exists(Profile::path(config('db-snapshot.profile_path'), $profile));
 
@@ -188,6 +188,6 @@ class StartCommand extends Command
             options: ['use' => 'Use it as it is', 'edit' => 'Edit it first'],
         ) === 'edit';
 
-        return ! $edit || $this->call('snapshot:configure', ['profile' => $profile]) === self::SUCCESS;
+        return ! $edit || $this->call('snapshot:configure', array_filter(['profile' => $profile, '--from' => $copyFrom])) === self::SUCCESS;
     }
 }

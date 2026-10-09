@@ -7,6 +7,7 @@ use Overthink\DbSnapshot\Analysis\Analyzer;
 use Overthink\DbSnapshot\Commands\AnalyzeCommand;
 use Overthink\DbSnapshot\Commands\ConfigureCommand;
 use Overthink\DbSnapshot\Commands\ListCommand;
+use Overthink\DbSnapshot\Commands\ProfilesCommand;
 use Overthink\DbSnapshot\Commands\PullCommand;
 use Overthink\DbSnapshot\Commands\RefreshCommand;
 use Overthink\DbSnapshot\Commands\RefreshTableCommand;
@@ -35,6 +36,7 @@ class DbSnapshotServiceProvider extends PackageServiceProvider
                 RefreshCommand::class,
                 RefreshTableCommand::class,
                 ListCommand::class,
+                ProfilesCommand::class,
             ]);
     }
 

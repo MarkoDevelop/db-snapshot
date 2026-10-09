@@ -37,6 +37,7 @@ class ConfigureCommand extends Command
     protected $signature = 'snapshot:configure
         {profile? : Profile name (asked when there are several; saved as <profile>.json)}
         {--profile= : The same as the profile argument}
+        {--from= : Start from a copy of this profile}
         {--analyze : Re-read the remote database first}';
 
     protected $description = 'Choose which tables a snapshot contains and how much of each';
@@ -51,11 +52,23 @@ class ConfigureCommand extends Command
             return self::FAILURE;
         }
 
-        $profileName = $this->chooseProfile($this->argument('profile') ?: $this->option('profile'), allowNew: true);
+        [$profileName, $copyFrom] = $this->pickProfile($this->argument('profile') ?: $this->option('profile'), offerNew: true, askWithOne: true);
+        $copyFrom = $this->option('from') ?: $copyFrom;
         $profileDirectory = config('db-snapshot.profile_path');
-        $existing = File::exists(Profile::path($profileDirectory, $profileName))
-            ? Profile::load($profileDirectory, $profileName)
-            : new Profile($profileName);
+        $source = $copyFrom ?? $profileName;
+        $loaded = File::exists(Profile::path($profileDirectory, $source)) ? Profile::load($profileDirectory, $source) : null;
+
+        if ($copyFrom !== null && $loaded === null) {
+            error("Profile [{$copyFrom}] doesn't exist, so there is nothing to copy.");
+
+            return self::FAILURE;
+        }
+
+        $existing = new Profile($profileName, $loaded->defaultMode ?? TableMode::Full, $loaded->tables ?? [], $loaded->notPersonal ?? []);
+
+        if ($copyFrom !== null) {
+            note("Starting from a copy of [{$copyFrom}]; it stays as it is.");
+        }
 
         $rules = $this->existingRules($existing, $analysis);
         $largeMb = (int) config('db-snapshot.large_table_mb');
@@ -99,16 +112,14 @@ class ConfigureCommand extends Command
 
         $this->summary($analysis, new Profile($profileName, $existing->defaultMode, $newRules, $notPersonal));
 
-        $saveAs = $this->askProfileName($profileDirectory, $profileName);
-
-        if ($saveAs === null) {
+        if (! confirm("Save profile [{$profileName}]?")) {
             info('Nothing changed.');
 
             return self::FAILURE;
         }
 
-        $profile = new Profile($saveAs, $existing->defaultMode, $newRules, $notPersonal);
-        info('Saved '.$profile->save($profileDirectory).". Pull it with: php artisan snapshot:pull --profile={$saveAs}");
+        $profile = new Profile($profileName, $existing->defaultMode, $newRules, $notPersonal);
+        info('Saved '.$profile->save($profileDirectory).". Pull it with: php artisan snapshot:pull --profile={$profileName}");
 
         $this->offerIndexMigration($profile, $analysis);
 
@@ -296,24 +307,6 @@ class ConfigureCommand extends Command
             AnonymizeStrategy::Fixed => new ColumnRule($strategy, text(label: "Value for every {$key}", required: true)),
             default => new ColumnRule($strategy),
         };
-    }
-
-    private function askProfileName(string $directory, string $current): ?string
-    {
-        $name = text(
-            label: 'Save as profile',
-            default: $current,
-            required: true,
-            validate: fn (string $value): ?string => preg_match('/^[A-Za-z0-9_-]+$/', $value) ? null : 'Use letters, digits, - and _ only.',
-            hint: 'Saved to '.Profile::path($directory, '<name>'),
-        );
-
-        if ($name !== $current && File::exists(Profile::path($directory, $name))
-            && ! confirm("Profile [{$name}] already exists. Overwrite it?", default: false)) {
-            return null;
-        }
-
-        return $name;
     }
 
     private function offerIndexMigration(Profile $profile, Analysis $analysis): void

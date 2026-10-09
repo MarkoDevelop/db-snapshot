@@ -111,7 +111,7 @@ it('re-analyzes and opens the profile editor with --fresh, keeping the connectio
         ->expectsQuestion('Any other tables to filter, empty or skip? (type to search, Enter for none)', 'orders')
         ->expectsChoice('Any other tables to filter, empty or skip? (type to search, Enter for none)', ['orders'], ['orders' => 'orders · 1000 B · ~10 rows'])
         ->expectsChoice('orders (1000 B, ~10 rows)', 'full', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
-        ->expectsQuestion('Save as profile', 'default')
+        ->expectsConfirmation('Save profile [default]?', 'yes')
         ->expectsConfirmation('Pull a snapshot with profile [default] now?', 'no')
         ->assertSuccessful();
 

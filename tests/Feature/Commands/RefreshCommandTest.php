@@ -15,7 +15,7 @@ it('pulls the chosen profile and then restores it', function () {
             'profile' => 'The whole database, from a profile (pull + restore)',
             'tables' => 'Just some tables (the rest of the database stays as it is)',
         ])
-        ->expectsChoice('Which profile?', 'nightly', ['default' => 'default', 'nightly' => 'nightly'])
+        ->expectsChoice('Which profile?', 'nightly', ['default' => 'default · 1 rule · never pulled', 'nightly' => 'nightly · 0 rules · never pulled'])
         ->expectsChoice('Restore into which database?', 'app', [
             'app' => "dev_app (the app's database)",
             'new' => 'production_'.now()->format('Y_m_d').' (a database for this snapshot)',

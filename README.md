@@ -26,6 +26,7 @@ php artisan snapshot:restore     # drop + recreate the local DB from the latest 
 php artisan snapshot:refresh     # later on: refresh a whole profile, or just some tables
 php artisan snapshot:refresh-table orders users   # pull + replace only these tables
 php artisan snapshot:list
+php artisan snapshot:profiles    # saved profiles with their rules and last pull
 ```
 
 ## Why
@@ -84,11 +85,22 @@ The remote password goes to the SSH session's stdin and is exported there (as `M
 
 `snapshot:configure [profile]` writes `database/snapshot-profiles/<profile>.json`.
 
-Every command takes `--profile=` (`snapshot:configure` also accepts the name as an argument). Without one:
-- with several saved profiles, the command asks **Which profile?**, with `default` preselected. `snapshot` and `snapshot:configure` also offer **New profile…** there.
-- with one profile, it's used without asking.
-- with none, `default` is used.
-- run with `--no-interaction`, `default` is always used.
+Every command takes `--profile=` (`snapshot:configure` also accepts the name as an argument). Without one, the command asks **Which profile?**. Each profile is listed with its details:
+
+```
+Which profile?
+› default · 12 rules · anonymizes 4 columns · pulled 2 hours ago
+  nightly · 3 rules · never pulled
+  New profile…
+  Copy a profile…
+```
+
+- `snapshot:configure` asks as soon as one profile exists. **New profile…** starts empty, and **Copy a profile…** starts from a copy, leaving the original as it is (or pass `--from=nightly`). Saving asks *Save profile [name]?*.
+- `snapshot` offers the same list, and the read-only commands (`pull`, `refresh`, `refresh-table`) show it without the New and Copy entries. These ask only when there are several profiles; with one, it's used.
+- With more than 7 profiles the list becomes searchable.
+- With no profiles, or with `--no-interaction`, `default` is used.
+
+`snapshot:profiles` lists every profile with the same details. Profiles are plain JSON files, so remove or rename them like any file.
 
 A profile looks like this:
 
