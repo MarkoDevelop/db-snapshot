@@ -12,7 +12,7 @@ use Overthink\DbSnapshot\Profile\TableRule;
 use Overthink\DbSnapshot\Snapshot\Snapshot;
 use Overthink\DbSnapshot\Tests\TestCase;
 
-uses(TestCase::class)->in('Unit', 'Feature');
+uses(TestCase::class)->in('Unit', 'Feature', 'Integration');
 
 /**
  * A faked process's command as one string (restore commands are argument lists).

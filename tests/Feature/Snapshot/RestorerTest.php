@@ -6,7 +6,7 @@ use Illuminate\Support\Sleep;
 use Overthink\DbSnapshot\Snapshot\Restorer;
 use Overthink\DbSnapshot\Snapshot\Snapshot;
 
-it('recreates the database, imports tables largest first, then routines and views', function () {
+it('recreates the database, imports routines, then tables largest first, then views', function () {
     Sleep::fake();
     $commands = [];
     Process::fake(function ($process) use (&$commands) {
@@ -20,10 +20,10 @@ it('recreates the database, imports tables largest first, then routines and view
 
     expect($commands)->toHaveCount(6)
         ->and($commands[0])->toContain('DROP DATABASE IF EXISTS `dev_wt`; CREATE DATABASE `dev_wt` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci')
-        ->and($commands[1])->toContain('tables/event_logs.sql.gz')
-        ->and($commands[2])->toContain('tables/orders.sql.gz')
-        ->and($commands[3])->toContain('tables/users.sql.gz')
-        ->and($commands[4])->toContain(Snapshot::ROUTINES_FILE)
+        ->and($commands[1])->toContain(Snapshot::ROUTINES_FILE)
+        ->and($commands[2])->toContain('tables/event_logs.sql.gz')
+        ->and($commands[3])->toContain('tables/orders.sql.gz')
+        ->and($commands[4])->toContain('tables/users.sql.gz')
         ->and($commands[5])->toContain(Snapshot::VIEWS_FILE);
 });
 
@@ -109,4 +109,24 @@ it('reports views it cannot create as warnings and keeps the restored tables', f
     expect($warnings)->toBe(["Some views could not be created:\n  ERROR 1049 (42000) at line 60: Unknown database 'prod_crm'"]);
     Process::assertRan(fn ($process) => str_contains(commandLine($process), '_views.sql.gz') && str_contains(commandLine($process), "'--force'"));
     Process::assertRan(fn ($process) => str_contains(commandLine($process), 'tables/orders.sql.gz') && ! str_contains(commandLine($process), '--force'));
+});
+
+it('applies post-data after the tables and reports what failed as warnings', function () {
+    Sleep::fake();
+    $commands = [];
+    Process::fake(function ($process) use (&$commands) {
+        $commands[] = commandLine($process);
+
+        return str_contains(commandLine($process), Snapshot::POST_DATA_FILE)
+            ? Process::result(errorOutput: 'psql:<stdin>:12: ERROR:  relation "skipped" does not exist', exitCode: 3)
+            : Process::result();
+    });
+    $snapshot = makeSnapshot($this->workspace.'/snap', ['orders' => 1], withRoutines: false);
+    File::put($snapshot->path.'/'.Snapshot::POST_DATA_FILE, 'x');
+
+    $warnings = app(Restorer::class)->restore($snapshot, localConnection(), 1);
+
+    expect($commands[1])->toContain('tables/orders.sql.gz')
+        ->and($commands[2])->toContain(Snapshot::POST_DATA_FILE)
+        ->and($warnings)->toBe(["Some indexes or constraints could not be created:\n  psql:<stdin>:12: ERROR:  relation \"skipped\" does not exist"]);
 });

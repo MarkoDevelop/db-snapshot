@@ -26,6 +26,7 @@ it('asks for missing settings, saves them to .env and checks the connection', fu
     File::put($this->workspace.'/.env', "APP_NAME=App\n");
 
     $this->artisan('snapshot')
+        ->expectsChoice('Database driver', 'mysql', ['mysql' => 'mysql', 'pgsql' => 'pgsql'])
         ->expectsQuestion('SSH host', '203.0.113.10')
         ->expectsQuestion('SSH user', 'root')
         ->expectsQuestion('SSH port', '22')
@@ -40,6 +41,7 @@ it('asks for missing settings, saves them to .env and checks the connection', fu
         ->assertFailed();
 
     expect(File::get($this->workspace.'/.env'))
+        ->toContain("SNAPSHOT_DRIVER=mysql\n")
         ->toContain("SNAPSHOT_SSH_HOST=203.0.113.10\n")
         ->toContain("SNAPSHOT_REMOTE_DB_DATABASE=production\n")
         ->toContain("SNAPSHOT_REMOTE_DB_PASSWORD='pa ss'\n");
@@ -68,4 +70,27 @@ it('pulls with an existing profile and stops before restoring when declined', fu
 
     expect(app(SnapshotRepository::class)->find('latest', 'default')->manifest['tables'])->toHaveKey('orders');
     Process::assertNotRan(fn ($process) => is_array($process->command));
+});
+
+it('offers the chosen driver\'s default port and user', function () {
+    Process::fake(['*' => Process::result(errorOutput: 'Connection refused', exitCode: 255)]);
+    config()->set('db-snapshot.ssh.host', null);
+    config()->set('db-snapshot.remote', ['database' => null]);
+    app()->useEnvironmentPath($this->workspace);
+
+    $this->artisan('snapshot')
+        ->expectsChoice('Database driver', 'pgsql', ['mysql' => 'mysql', 'pgsql' => 'pgsql'])
+        ->expectsQuestion('SSH host', '203.0.113.10')
+        ->expectsQuestion('SSH user', 'root')
+        ->expectsQuestion('SSH port', '22')
+        ->expectsQuestion('Path to the SSH private key (as seen by this machine)', '')
+        ->expectsQuestion('Database host, as seen from the server', '127.0.0.1')
+        ->expectsQuestion('Database port', '5432')
+        ->expectsQuestion('Database user', 'postgres')
+        ->expectsQuestion('Database to snapshot', 'production')
+        ->expectsQuestion('Database password', '')
+        ->expectsConfirmation("Save these settings to {$this->workspace}/.env?", 'no')
+        ->assertFailed();
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'psql') && str_contains(commandLine($process), '--port=5432'));
 });

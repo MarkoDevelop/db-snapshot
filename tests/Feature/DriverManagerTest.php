@@ -25,7 +25,7 @@ it('pulls with a registered driver when it is configured', function () {
 it('lists registered drivers next to the built-in ones', function () {
     DbSnapshot::extend('fake', fn () => new FakeDriver);
 
-    expect(DbSnapshot::available())->toBe(['mysql', 'fake']);
+    expect(DbSnapshot::available())->toBe(['mysql', 'pgsql', 'fake']);
 });
 
 it('restores with the driver the snapshot was pulled with', function () {

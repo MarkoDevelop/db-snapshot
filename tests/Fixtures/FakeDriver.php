@@ -71,6 +71,11 @@ class FakeDriver implements Driver
         return null;
     }
 
+    public function dumpPostDataCommand(array $tables, string $file): ?string
+    {
+        return null;
+    }
+
     public function remoteInput(): string
     {
         return '';

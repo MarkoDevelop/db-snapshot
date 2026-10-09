@@ -4,7 +4,7 @@
 [![GitHub Tests Action Status](https://img.shields.io/github/actions/workflow/status/MarkoDevelop/db-snapshot/run-tests.yml?branch=main&label=tests&style=flat-square)](https://github.com/MarkoDevelop/db-snapshot/actions?query=workflow%3Arun-tests+branch%3Amain)
 [![Total Downloads](https://img.shields.io/packagist/dt/overthink/db-snapshot.svg?style=flat-square)](https://packagist.org/packages/overthink/db-snapshot)
 
-Pull a filtered copy of a remote database (MySQL and MariaDB built in, other databases via drivers) over SSH and restore it into your local one. Pick the tables you need, keep only the last few months of the big history tables, and store that choice in a profile your team commits.
+Pull a filtered copy of a remote database (MySQL, MariaDB and PostgreSQL built in, others via drivers) over SSH and restore it into your local one. Pick the tables you need, keep only the last few months of the big history tables, and store that choice in a profile your team commits.
 
 ```bash
 composer require --dev overthink/db-snapshot
@@ -40,8 +40,8 @@ On the server the package only ever runs read-only queries against the schema ca
 ## Requirements
 
 - PHP `^8.3`, Laravel `^11.0 || ^12.0 || ^13.0`
-- Locally (where artisan runs): `ssh`, `bash`, `gzip`, and the database client (`mysql` for the mysql driver)
-- On the server: `bash`, `gzip`, and the dump tool (`mysqldump` for the mysql driver)
+- Locally (where artisan runs): `ssh`, `bash`, `gzip`, and the database client (`mysql`, or `psql` and `sed` for pgsql)
+- On the server: `bash`, `gzip`, and the dump tools (`mysqldump`, or `pg_dump` and `psql` for pgsql)
 
 ## Installation
 
@@ -148,6 +148,22 @@ Everything database-specific lives in a driver: reading the schema catalog, buil
 - `dump_options`: extra `mysqldump` flags (defaults: `--single-transaction --quick --skip-lock-tables --no-tablespaces --hex-blob`).
 - `skip_gtid_purged`: adds `--set-gtid-purged=OFF`, so dumps from GTID-enabled servers can be imported table by table. With `auto` (the default) it checks `mysqldump --version` on the server once per pull and leaves the flag out for MariaDB's `mysqldump`, which doesn't know it. Set `true` or `false` to force it. The restore also strips any `SET @@GLOBAL.GTID_PURGED` it finds, so older snapshots import fine.
 
+**`pgsql`** (built in) covers PostgreSQL 13 and newer. It reads `pg_catalog` and uses `pg_dump` and `psql` on the server and `psql` locally (default port 5432, user `postgres`). Options under `drivers.pgsql`:
+
+- `schema`: the schema to snapshot (`SNAPSHOT_PGSQL_SCHEMA`, default `public`). Other schemas are created locally.
+- `dump_options`: extra `pg_dump` flags. `--no-owner --no-privileges` are always used, so the server's roles don't have to exist locally.
+- `maintenance_database`: the local database `psql` connects to while dropping and recreating the target (default `postgres`).
+
+How it differs from mysql, because `pg_dump` has no `--where` and Postgres has no "foreign key checks off" switch:
+
+- Filtered tables (`recent`, `where`) are dumped as their definition plus `COPY` of a `SELECT … WHERE …`. Afterwards each sequence the table owns is moved past the highest restored id.
+- Indexes, constraints and triggers of all tables go into one post-data file that is restored after every table is loaded. Foreign keys are created `NOT VALID`: rows that point at filtered-out rows stay, and new rows are still checked.
+- Extensions and functions of the schema are restored before the tables, since columns and defaults may use them.
+- The restore drops statements that newer `pg_dump` versions write but older `psql` clients reject (`SET transaction_timeout`, `\restrict`).
+- `DROP DATABASE … WITH (FORCE)` disconnects anyone still connected to the local target database.
+
+Limitations: one schema per snapshot; partitioned tables, materialized view data and sequences not owned by a table are not handled specially. `snapshot:refresh-table` drops the table with `CASCADE`, so foreign keys in *other* tables that point at it, and views on it, have to be restored again with a full `snapshot:restore`.
+
 Snapshots record the driver that pulled them, and `snapshot:restore` always uses that driver. It refuses to restore into a connection of another kind (for example a MySQL snapshot into a `pgsql` connection).
 
 ### Writing a driver
@@ -182,7 +198,7 @@ When artisan runs in a container (Sail, a custom `workspace` service, …), the 
 docker compose exec workspace sh -c 'which ssh bash gzip mysql'
 ```
 
-For the mysql driver, the MariaDB `mysql` client restores into MySQL fine.
+For the mysql driver, the MariaDB `mysql` client restores into MySQL fine. For pgsql, check `which psql sed` instead; the local `psql` should be at least as new as the server.
 
 **SSH key.** Mount only the key you need, read-only, into the home directory of the user the container runs as (`docker compose exec workspace id` shows it), and point `SNAPSHOT_SSH_KEY` at the path *inside* the container:
 
@@ -217,6 +233,12 @@ SNAPSHOT_PATH=/var/snapshots
 ```bash
 composer test
 composer analyse
+```
+
+The PostgreSQL integration tests run against a real server and are skipped unless `DB_SNAPSHOT_PGSQL_HOST` is set (`DB_SNAPSHOT_PGSQL_PORT`, `_USERNAME` and `_PASSWORD` are optional). `pg_dump` and `psql` must be on `PATH`:
+
+```bash
+DB_SNAPSHOT_PGSQL_HOST=127.0.0.1 DB_SNAPSHOT_PGSQL_PASSWORD=secret vendor/bin/pest tests/Integration
 ```
 
 ## Changelog

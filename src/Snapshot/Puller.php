@@ -68,15 +68,18 @@ final class Puller
             $manifestTables[$table->name] = ['mode' => $rule->mode->value, 'where' => $where, 'file' => $file];
         }
 
-        if (! $partial) {
-            $extras = [
-                '_views' => $views !== [] ? $this->driver->dumpViewsCommand($views, $directory.'/'.Snapshot::VIEWS_FILE) : null,
-                '_routines' => $this->driver->dumpRoutinesCommand($directory.'/'.Snapshot::ROUTINES_FILE),
-            ];
+        $dataTables = array_keys($manifestTables);
+        $extras = [
+            '_post-data' => $dataTables !== [] ? $this->driver->dumpPostDataCommand($dataTables, $directory.'/'.Snapshot::POST_DATA_FILE) : null,
+        ];
 
-            foreach (array_filter($extras) as $key => $command) {
-                $jobs[$key] = $this->job($command);
-            }
+        if (! $partial) {
+            $extras['_views'] = $views !== [] ? $this->driver->dumpViewsCommand($views, $directory.'/'.Snapshot::VIEWS_FILE) : null;
+            $extras['_routines'] = $this->driver->dumpRoutinesCommand($directory.'/'.Snapshot::ROUTINES_FILE);
+        }
+
+        foreach (array_filter($extras) as $key => $command) {
+            $jobs[$key] = $this->job($command);
         }
 
         $results = $this->runner->run(

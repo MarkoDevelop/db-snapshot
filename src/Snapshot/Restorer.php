@@ -33,26 +33,16 @@ final class Restorer
 
         $this->ensureSucceeded('recreate database', $this->process($driver, $connection)->run($driver->recreateDatabaseCommand($connection)));
 
-        $this->importTables($snapshot, $connection, $parallel, $onFinished);
+        // Routines (and, for some drivers, extensions) come first because
+        // tables can use them; views come last because they read tables.
+        $warnings = $this->importLeniently($driver, $connection, 'routines', $snapshot->routinesFile());
 
-        $warnings = [];
+        $warnings = [...$warnings, ...$this->importTables($snapshot, $connection, $parallel, $onFinished)];
 
-        // Views and routines can reference other databases or users that only
-        // exist on the server, so create what we can and report the rest.
-        foreach (['routines' => $snapshot->routinesFile(), 'views' => $snapshot->viewsFile()] as $kind => $file) {
-            if ($file === null) {
-                continue;
-            }
-
-            $result = $this->process($driver, $connection)->run($driver->importCommand($connection, $file, continueOnError: true));
-
-            if ($result->failed()) {
-                $errors = preg_grep('/ERROR/', preg_split('/\R/', $result->errorOutput()) ?: []) ?: [trim($result->errorOutput())];
-                $warnings[] = "Some {$kind} could not be created:\n  ".implode("\n  ", $errors);
-            }
-        }
-
-        return $warnings;
+        return [
+            ...$warnings,
+            ...$this->importLeniently($driver, $connection, 'views', $snapshot->viewsFile()),
+        ];
     }
 
     /**
@@ -61,8 +51,9 @@ final class Restorer
      *
      * @param  array<string, mixed>  $connection
      * @param  (Closure(string, ProcessResult, float): void)|null  $onFinished
+     * @return list<string> warnings about indexes or constraints that could not be created
      */
-    public function importTables(Snapshot $snapshot, array $connection, int $parallel, ?Closure $onFinished = null): void
+    public function importTables(Snapshot $snapshot, array $connection, int $parallel, ?Closure $onFinished = null): array
     {
         $driver = $this->driverFor($snapshot, $connection);
         $jobs = [];
@@ -82,6 +73,34 @@ final class Restorer
                 $failed,
             )));
         }
+
+        // Indexes, constraints and triggers of drivers that keep them apart.
+        return $this->importLeniently($driver, $connection, 'indexes or constraints', $snapshot->postDataFile());
+    }
+
+    /**
+     * Views, routines and constraints can reference databases, users or tables
+     * that only exist on the server, so create what we can and report the rest.
+     *
+     * @param  array<string, mixed>  $connection
+     * @return list<string>
+     */
+    private function importLeniently(Driver $driver, array $connection, string $kind, ?string $file): array
+    {
+        if ($file === null) {
+            return [];
+        }
+
+        $result = $this->process($driver, $connection)->run($driver->importCommand($connection, $file, continueOnError: true));
+
+        // Some clients (psql without ON_ERROR_STOP) exit 0 after failed statements.
+        if ($result->successful() && ! str_contains($result->errorOutput(), 'ERROR')) {
+            return [];
+        }
+
+        $errors = preg_grep('/ERROR/', preg_split('/\R/', $result->errorOutput()) ?: []) ?: [trim($result->errorOutput())];
+
+        return ["Some {$kind} could not be created:\n  ".implode("\n  ", $errors)];
     }
 
     /**
