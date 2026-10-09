@@ -57,8 +57,9 @@ function prepareRefresh(string $workspace): void
     Process::fake([
         '*information_schema.TABLES*' => Process::result("orders\tBASE TABLE\t10\t1000\t0\nevent_logs\tBASE TABLE\t10\t1000\t0\nusers\tBASE TABLE\t10\t1000\t0"),
         '*mysqldump*' => function ($process) {
-            preg_match("/> '([^']+)'$/", $process->command, $target);
-            File::put($target[1], gzencode('-- dump'));
+            if (preg_match("/> '([^']+)'$/", $process->command, $target)) {
+                File::put($target[1], gzencode('-- dump'));
+            }
 
             return Process::result();
         },

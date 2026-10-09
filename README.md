@@ -4,14 +4,14 @@
 [![GitHub Tests Action Status](https://img.shields.io/github/actions/workflow/status/MarkoDevelop/db-snapshot/run-tests.yml?branch=main&label=tests&style=flat-square)](https://github.com/MarkoDevelop/db-snapshot/actions?query=workflow%3Arun-tests+branch%3Amain)
 [![Total Downloads](https://img.shields.io/packagist/dt/overthink/db-snapshot.svg?style=flat-square)](https://packagist.org/packages/overthink/db-snapshot)
 
-Pull a filtered copy of a remote MySQL database over SSH and restore it into your local one. Pick the tables you need, keep only the last few months of the big history tables, and store that choice in a profile your team commits.
+Pull a filtered copy of a remote database (MySQL and MariaDB built in, other databases via drivers) over SSH and restore it into your local one. Pick the tables you need, keep only the last few months of the big history tables, and store that choice in a profile your team commits.
 
 ```bash
 composer require --dev overthink/db-snapshot
 php artisan snapshot
 ```
 
-`php artisan snapshot` walks you through everything: it asks for the SSH and MySQL settings (and saves them to `.env`), checks the connection, analyzes the remote database, lets you build a profile, then pulls and restores. Run it again any time; it skips the steps that are already done.
+`php artisan snapshot` walks you through everything: it asks for the SSH and database settings (and saves them to `.env`), checks the connection, analyzes the remote database, lets you build a profile, then pulls and restores. Run it again any time; it skips the steps that are already done.
 
 The individual steps are commands too:
 
@@ -35,13 +35,13 @@ The usual `mysqldump > dump.sql && gzip && scp` routine writes the whole dump to
 - **filters per table**: full, schema only, the last N months by a date column, a custom `WHERE`, or skip;
 - **pulls once, restores many times**: snapshots live in a directory that several checkouts or worktrees can share, and restores import tables in parallel.
 
-The package only ever runs `SELECT`s against `information_schema` (plus `MIN`/`MAX` on indexed date columns) and `mysqldump` on the server.
+On the server the package only ever runs read-only queries against the schema catalog (plus `MIN`/`MAX` on indexed date columns) and the database's dump tool.
 
 ## Requirements
 
 - PHP `^8.3`, Laravel `^11.0 || ^12.0 || ^13.0`
-- Locally (where artisan runs): `ssh`, `bash`, `gzip`, the `mysql` client
-- On the server: `bash`, `gzip`, `mysqldump`
+- Locally (where artisan runs): `ssh`, `bash`, `gzip`, and the database client (`mysql` for the mysql driver)
+- On the server: `bash`, `gzip`, and the dump tool (`mysqldump` for the mysql driver)
 
 ## Installation
 
@@ -60,9 +60,10 @@ SNAPSHOT_SSH_USER=deploy
 SNAPSHOT_SSH_PORT=22
 SNAPSHOT_SSH_KEY=/root/.ssh/snapshot_key
 
+SNAPSHOT_DRIVER=mysql
 SNAPSHOT_REMOTE_DB_HOST=127.0.0.1
-SNAPSHOT_REMOTE_DB_PORT=3306
-SNAPSHOT_REMOTE_DB_USERNAME=root
+SNAPSHOT_REMOTE_DB_PORT=3306          # default per driver
+SNAPSHOT_REMOTE_DB_USERNAME=root      # default per driver
 SNAPSHOT_REMOTE_DB_PASSWORD=
 SNAPSHOT_REMOTE_DB_DATABASE=production
 
@@ -72,7 +73,7 @@ SNAPSHOT_PARALLEL=4
 SNAPSHOT_CONNECTION=                # restore target, default: the app's default connection
 ```
 
-The remote password goes to the SSH session's stdin and is exported as `MYSQL_PWD` there, so it never shows up in a command line on either machine. Leave it empty to use the server user's `~/.my.cnf`.
+The remote password goes to the SSH session's stdin and is exported there (as `MYSQL_PWD` for the mysql driver), so it never shows up in a command line on either machine. Leave it empty to use the server user's `~/.my.cnf`.
 
 ## Profiles
 
@@ -138,9 +139,42 @@ A snapshot is a directory of `tables/<table>.sql.gz` files plus `_views.sql.gz`,
 
 `snapshot:restore` refuses to run in the `production` environment.
 
+## Drivers
+
+Everything database-specific lives in a driver: reading the schema catalog, building the dump commands that run on the server, and importing dumps locally. Select one with `SNAPSHOT_DRIVER`.
+
+**`mysql`** (built in) covers MySQL and MariaDB. It uses `information_schema` and `mysqldump` on the server and the `mysql` client locally. Driver options live under `drivers.mysql` in the config:
+
+- `dump_options`: extra `mysqldump` flags (defaults: `--single-transaction --quick --skip-lock-tables --no-tablespaces --hex-blob`).
+- `skip_gtid_purged`: adds `--set-gtid-purged=OFF`, so dumps from GTID-enabled servers can be imported table by table. With `auto` (the default) it checks `mysqldump --version` on the server once per pull and leaves the flag out for MariaDB's `mysqldump`, which doesn't know it. Set `true` or `false` to force it. The restore also strips any `SET @@GLOBAL.GTID_PURGED` it finds, so older snapshots import fine.
+
+Snapshots record the driver that pulled them, and `snapshot:restore` always uses that driver. It refuses to restore into a connection of another kind (for example a MySQL snapshot into a `pgsql` connection).
+
+### Writing a driver
+
+Implement `Overthink\DbSnapshot\Contracts\Driver`. Extending `Overthink\DbSnapshot\Drivers\SshDriver` gives you the SSH plumbing: the password sent over stdin, running a query and parsing tab-separated rows, and gzipping a remote dump into a local file. Then register it in a service provider:
+
+```php
+use Overthink\DbSnapshot\Facades\DbSnapshot;
+
+public function boot(): void
+{
+    DbSnapshot::extend('sqlsrv', fn ($app) => new SqlServerDriver(
+        config('db-snapshot.ssh'),
+        config('db-snapshot.remote'),
+    ));
+}
+```
+
+```dotenv
+SNAPSHOT_DRIVER=sqlsrv
+```
+
+`MysqlDriver` is the reference implementation.
+
 ## Running in Docker
 
-When artisan runs in a container (Sail, a custom `workspace` service, …), the SSH session and the `mysql` client run there too, so the container needs the tools, the key and a place for snapshots.
+When artisan runs in a container (Sail, a custom `workspace` service, …), the SSH session and the `mysql` client run there too, so the container needs the tools, the key and a place for snapshots. The examples use the mysql driver's tools.
 
 **Tools.** The image needs `ssh`, `bash`, `gzip` and a `mysql` client. Check with:
 
@@ -148,7 +182,7 @@ When artisan runs in a container (Sail, a custom `workspace` service, …), the 
 docker compose exec workspace sh -c 'which ssh bash gzip mysql'
 ```
 
-The MariaDB `mysql` client restores into MySQL fine.
+For the mysql driver, the MariaDB `mysql` client restores into MySQL fine.
 
 **SSH key.** Mount only the key you need, read-only, into the home directory of the user the container runs as (`docker compose exec workspace id` shows it), and point `SNAPSHOT_SSH_KEY` at the path *inside* the container:
 

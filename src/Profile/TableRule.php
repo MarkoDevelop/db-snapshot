@@ -81,18 +81,6 @@ final class TableRule
         return ($now ?? CarbonImmutable::now())->subMonthsNoOverflow((int) $this->months)->startOfDay();
     }
 
-    /**
-     * The mysqldump --where condition, or null when all rows are dumped.
-     */
-    public function whereClause(?CarbonImmutable $now = null): ?string
-    {
-        return match ($this->mode) {
-            TableMode::Recent => "`{$this->column}` >= '".$this->sinceDate($now)->format('Y-m-d H:i:s')."'",
-            TableMode::Where => $this->where,
-            default => null,
-        };
-    }
-
     public function describe(): string
     {
         return match ($this->mode) {

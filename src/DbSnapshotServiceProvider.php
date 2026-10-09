@@ -12,8 +12,7 @@ use Overthink\DbSnapshot\Commands\RefreshCommand;
 use Overthink\DbSnapshot\Commands\RefreshTableCommand;
 use Overthink\DbSnapshot\Commands\RestoreCommand;
 use Overthink\DbSnapshot\Commands\StartCommand;
-use Overthink\DbSnapshot\Remote\RemoteMysql;
-use Overthink\DbSnapshot\Remote\SshConnection;
+use Overthink\DbSnapshot\Contracts\Driver;
 use Overthink\DbSnapshot\Snapshot\ParallelRunner;
 use Overthink\DbSnapshot\Snapshot\Puller;
 use Overthink\DbSnapshot\Snapshot\SnapshotRepository;
@@ -41,15 +40,13 @@ class DbSnapshotServiceProvider extends PackageServiceProvider
 
     public function packageRegistered(): void
     {
-        $this->app->bind(SshConnection::class, fn (Application $app): SshConnection => SshConnection::fromConfig($app['config']['db-snapshot.ssh']));
+        // A singleton like Laravel's own managers, so drivers registered with extend() stay registered.
+        $this->app->singleton(DriverManager::class, fn (Application $app): DriverManager => new DriverManager($app)); // @phpstan-ignore larastan.octaneCompatibility
 
-        $this->app->bind(RemoteMysql::class, fn (Application $app): RemoteMysql => RemoteMysql::fromConfig(
-            $app->make(SshConnection::class),
-            $app['config']['db-snapshot.remote'],
-        ));
+        $this->app->bind(Driver::class, fn (Application $app): Driver => $app->make(DriverManager::class)->driver());
 
         $this->app->bind(Puller::class, fn (Application $app): Puller => new Puller(
-            $app->make(RemoteMysql::class),
+            $app->make(Driver::class),
             $app->make(Analyzer::class),
             $app->make(ParallelRunner::class),
             $app['config']['db-snapshot.path'],

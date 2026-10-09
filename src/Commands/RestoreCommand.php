@@ -22,7 +22,7 @@ class RestoreCommand extends Command
         {snapshot=latest : Snapshot directory name, or "latest"}
         {--profile= : With "latest", the newest snapshot of this profile}
         {--database= : Restore into this database instead of the connection\'s own}
-        {--parallel= : Parallel mysql clients (default: config db-snapshot.parallel)}
+        {--parallel= : Parallel database clients (default: config db-snapshot.parallel)}
         {--force : Do not ask before dropping the database}';
 
     protected $description = 'Drop the local database and recreate it from a snapshot';

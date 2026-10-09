@@ -18,7 +18,7 @@ final class Snapshot
     public const VIEWS_FILE = '_views.sql.gz';
 
     /**
-     * @param  array{profile: string, database: string, created_at: string, partial?: bool, tables: array<string, array{mode: string, where: ?string, bytes: int}>}  $manifest
+     * @param  array{profile: string, driver?: string, database: string, created_at: string, partial?: bool, tables: array<string, array{mode: string, where: ?string, bytes: int}>}  $manifest
      */
     public function __construct(
         public readonly string $path,
@@ -42,6 +42,14 @@ final class Snapshot
     public function isPartial(): bool
     {
         return (bool) ($this->manifest['partial'] ?? false);
+    }
+
+    /**
+     * The driver that pulled the snapshot (snapshots without one are from mysql).
+     */
+    public function driver(): string
+    {
+        return $this->manifest['driver'] ?? 'mysql';
     }
 
     public function name(): string
