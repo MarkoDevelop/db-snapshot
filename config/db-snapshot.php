@@ -98,6 +98,11 @@ return [
     */
     'connection' => env('SNAPSHOT_CONNECTION'),
 
+    // Name offered by snapshot:restore for a new database per snapshot. Also
+    // usable in --database=. Placeholders: {source}, {profile}, {date}, {time}
+    // and {database} (the connection's own database).
+    'database_name' => env('SNAPSHOT_DATABASE_NAME', '{source}_{date}'),
+
     /*
     |--------------------------------------------------------------------------
     | Storage

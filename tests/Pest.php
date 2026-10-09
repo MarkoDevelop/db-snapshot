@@ -22,7 +22,7 @@ function commandLine(PendingProcess $process): string
     return is_array($process->command) ? implode(' ', $process->command) : $process->command;
 }
 
-function makeSnapshot(string $path, array $tableSizes, bool $withRoutines = true): Snapshot
+function makeSnapshot(string $path, array $tableSizes, bool $withRoutines = true, string $createdAt = '2026-10-08T12:00:00+00:00', string $profile = 'default'): Snapshot
 {
     File::ensureDirectoryExists($path.'/tables');
 
@@ -36,9 +36,9 @@ function makeSnapshot(string $path, array $tableSizes, bool $withRoutines = true
     }
 
     File::put($path.'/manifest.json', json_encode([
-        'profile' => 'default',
+        'profile' => $profile,
         'database' => 'production',
-        'created_at' => '2026-10-08T12:00:00+00:00',
+        'created_at' => $createdAt,
         'tables' => array_map(fn (int $size) => ['mode' => 'full', 'where' => null, 'bytes' => $size], $tableSizes),
     ]));
 
