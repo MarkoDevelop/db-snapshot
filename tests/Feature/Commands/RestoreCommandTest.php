@@ -1,5 +1,6 @@
 <?php
 
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Sleep;
 
@@ -21,6 +22,11 @@ it('does not drop the database when the confirmation is declined', function () {
     makeSnapshot($this->workspace.'/snapshots/2026-10-08_120000_default', ['orders' => 1]);
 
     $this->artisan('snapshot:restore')
+        ->expectsChoice('Restore into which database?', 'app', [
+            'app' => "dev_wt (the app's database)",
+            'new' => 'production_2026_10_08 (a database for this snapshot)',
+            'other' => 'Another name…',
+        ])
         ->expectsConfirmation('Drop and recreate dev_wt on mysql:3306?', 'no')
         ->assertFailed();
 
@@ -84,3 +90,31 @@ it('restores the newest without asking when told to or not interactive', functio
     'latest named' => [['snapshot' => 'latest']],
     'not interactive' => [['--no-interaction' => true]],
 ]);
+
+it('restores into a new database named from the template and can point the app at it', function () {
+    prepareSnapshotChoice($this->workspace);
+    app()->useEnvironmentPath($this->workspace);
+    File::put($this->workspace.'/.env', "APP_NAME=App\nDB_DATABASE=dev_wt\n");
+
+    $this->artisan('snapshot:restore', ['snapshot' => 'latest'])
+        ->expectsChoice('Restore into which database?', 'new', [
+            'app' => "dev_wt (the app's database)",
+            'new' => 'production_2026_10_08 (a database for this snapshot)',
+            'other' => 'Another name…',
+        ])
+        ->expectsConfirmation('Drop and recreate production_2026_10_08 on mysql:3306?', 'yes')
+        ->expectsConfirmation("Point the app at production_2026_10_08? (sets DB_DATABASE in {$this->workspace}/.env)", 'yes')
+        ->assertSuccessful();
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'CREATE DATABASE `production_2026_10_08`'));
+    expect(File::get($this->workspace.'/.env'))->toBe("APP_NAME=App\nDB_DATABASE=production_2026_10_08\n");
+});
+
+it('accepts placeholders in --database without asking', function () {
+    prepareSnapshotChoice($this->workspace);
+
+    $this->artisan('snapshot:restore', ['snapshot' => 'latest', '--database' => '{database}_{date}', '--no-interaction' => true, '--force' => true])
+        ->assertSuccessful();
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'CREATE DATABASE `dev_wt_2026_10_08`'));
+});

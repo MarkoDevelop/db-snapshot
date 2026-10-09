@@ -71,6 +71,7 @@ SNAPSHOT_REMOTE_DB_DATABASE=production
 SNAPSHOT_PATH=/var/snapshots        # default: storage/db-snapshots
 SNAPSHOT_PARALLEL=4
 SNAPSHOT_CONNECTION=                # restore target, default: the app's default connection
+SNAPSHOT_DATABASE_NAME={source}_{date}   # name offered for a new database per snapshot
 ```
 
 The remote password goes to the SSH session's stdin and is exported there (as `MYSQL_PWD` for the mysql driver), so it never shows up in a command line on either machine. Leave it empty to use the server user's `~/.my.cnf`.
@@ -149,6 +150,23 @@ php artisan snapshot:restore 2026-10-08_120000_default --database=dev_other
 A snapshot is a directory of `tables/<table>.sql.gz` files plus `_views.sql.gz`, `_routines.sql.gz` and `manifest.json`. It's written as `<name>.partial` and renamed only when every dump succeeds. A failed pull leaves nothing behind.
 
 Without a snapshot name, `snapshot:restore` lists the snapshots (filtered by `--profile=`), newest first and preselected, so Enter restores the latest. Pass a name or `latest`, or run it with `--no-interaction`, to skip the question.
+
+### One database per snapshot
+
+To keep several snapshots side by side (per source, per day, …), restore into a database named from a template:
+
+```bash
+php artisan snapshot:restore latest --database='{source}_{date}'    # e.g. production_2026_10_08
+```
+
+| Placeholder | Value |
+| --- | --- |
+| `{source}` | the remote database the snapshot came from |
+| `{profile}` | the snapshot's profile |
+| `{date}` / `{time}` | when it was pulled (`Y_m_d` / `His`) |
+| `{database}` | the connection's own database (`DB_DATABASE`) |
+
+Run interactively without `--database` or `--force`, `snapshot:restore` asks where to restore: the app's database, a new one named from `SNAPSHOT_DATABASE_NAME` (default `{source}_{date}`), or another name. After restoring into another database it offers to point the app at it by setting `DB_DATABASE` in `.env`.
 
 `snapshot:restore` refuses to run in the `production` environment.
 

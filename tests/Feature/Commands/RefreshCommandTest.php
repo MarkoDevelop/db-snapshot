@@ -16,6 +16,11 @@ it('pulls the chosen profile and then restores it', function () {
             'tables' => 'Just some tables (the rest of the database stays as it is)',
         ])
         ->expectsChoice('Which profile?', 'nightly', ['default' => 'default', 'nightly' => 'nightly'])
+        ->expectsChoice('Restore into which database?', 'app', [
+            'app' => "dev_app (the app's database)",
+            'new' => 'production_'.now()->format('Y_m_d').' (a database for this snapshot)',
+            'other' => 'Another name…',
+        ])
         ->expectsConfirmation('Drop and recreate dev_app on mysql:3306?', 'yes')
         ->assertSuccessful();
 

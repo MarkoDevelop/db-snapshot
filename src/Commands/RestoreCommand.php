@@ -7,6 +7,8 @@ use Illuminate\Contracts\Process\ProcessResult;
 use Overthink\DbSnapshot\Snapshot\Restorer;
 use Overthink\DbSnapshot\Snapshot\Snapshot;
 use Overthink\DbSnapshot\Snapshot\SnapshotRepository;
+use Overthink\DbSnapshot\Support\DatabaseName;
+use Overthink\DbSnapshot\Support\EnvFile;
 use Throwable;
 
 use function Laravel\Prompts\confirm;
@@ -14,6 +16,7 @@ use function Laravel\Prompts\error;
 use function Laravel\Prompts\info;
 use function Laravel\Prompts\note;
 use function Laravel\Prompts\select;
+use function Laravel\Prompts\text;
 use function Laravel\Prompts\warning;
 
 class RestoreCommand extends Command
@@ -23,7 +26,7 @@ class RestoreCommand extends Command
     protected $signature = 'snapshot:restore
         {snapshot? : Snapshot directory name, or "latest" (asked when omitted; the newest is preselected)}
         {--profile= : Only snapshots of this profile}
-        {--database= : Restore into this database instead of the connection\'s own}
+        {--database= : Restore into this database instead of the connection\'s own (placeholders like source, profile and date in braces work, see the README)}
         {--parallel= : Parallel database clients (default: config db-snapshot.parallel)}
         {--force : Do not ask before dropping the database}';
 
@@ -39,11 +42,12 @@ class RestoreCommand extends Command
 
         $connectionName = config('db-snapshot.connection') ?? config('database.default');
         $connection = config("database.connections.{$connectionName}");
-        $connection['database'] = $this->option('database') ?: $connection['database'];
+        $appDatabase = (string) $connection['database'];
         $parallel = (int) ($this->option('parallel') ?: config('db-snapshot.parallel'));
 
         try {
             $snapshot = $this->chooseSnapshot($snapshots, $this->option('profile') ?: null);
+            $connection['database'] = $this->chooseDatabase($snapshot, $appDatabase);
         } catch (Throwable $exception) {
             error($exception->getMessage());
 
@@ -81,6 +85,8 @@ class RestoreCommand extends Command
         }
 
         info(sprintf('Restored %s into %s in %ds.', $snapshot->name(), $target, (int) (microtime(true) - $startedAt)));
+
+        $this->offerToSwitch($connection['database'], $appDatabase);
 
         return self::SUCCESS;
     }
@@ -124,5 +130,62 @@ class RestoreCommand extends Command
             default: $available[0]->name(),
             scroll: 10,
         ));
+    }
+
+    /**
+     * --database (with placeholders), or, when interactive, the app's own
+     * database, a new one named from the template, or another name.
+     */
+    private function chooseDatabase(Snapshot $snapshot, string $appDatabase): string
+    {
+        $template = (string) config('db-snapshot.database_name');
+
+        if (filled($this->option('database'))) {
+            return DatabaseName::resolve((string) $this->option('database'), $snapshot, $appDatabase);
+        }
+
+        if (! $this->input->isInteractive() || $this->option('force')) {
+            return $appDatabase;
+        }
+
+        $suggested = DatabaseName::resolve($template, $snapshot, $appDatabase);
+
+        $choice = select(
+            label: 'Restore into which database?',
+            options: array_filter([
+                'app' => "{$appDatabase} (the app's database)",
+                'new' => $suggested !== $appDatabase ? "{$suggested} (a database for this snapshot)" : null,
+                'other' => 'Another name…',
+            ]),
+            default: 'app',
+        );
+
+        return match ($choice) {
+            'app' => $appDatabase,
+            'new' => $suggested,
+            default => DatabaseName::resolve(text(
+                label: 'Database name',
+                default: $suggested,
+                required: true,
+                hint: 'Placeholders: {source}, {profile}, {date}, {time}, {database}',
+            ), $snapshot, $appDatabase),
+        };
+    }
+
+    /**
+     * After restoring into another database, offer to point the app at it.
+     */
+    private function offerToSwitch(string $restored, string $appDatabase): void
+    {
+        if ($restored === $appDatabase || ! $this->input->isInteractive()) {
+            return;
+        }
+
+        $envPath = $this->laravel->environmentFilePath();
+
+        if (confirm("Point the app at {$restored}? (sets DB_DATABASE in {$envPath})", default: false)) {
+            (new EnvFile($envPath))->set(['DB_DATABASE' => $restored]);
+            info("DB_DATABASE is now {$restored}. Run php artisan config:clear if the config is cached.");
+        }
     }
 }
