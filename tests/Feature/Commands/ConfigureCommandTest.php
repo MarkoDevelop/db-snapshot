@@ -28,21 +28,21 @@ function prepareConfigure(string $workspace): void
 function configureEventLogs($command, string $saveAs)
 {
     return $command
-        ->expectsChoice('Large tables that should NOT be copied in full', ['event_logs'], ['event_logs' => 'event_logs · 500 MB · ~1.0K rows'])
-        ->expectsQuestion('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', 'users')
-        ->expectsChoice('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', ['users'], ['users' => 'users · 1.0 MB · ~10 rows'])
+        ->expectsChoice('Tables that should NOT be copied in full', ['event_logs'], ['event_logs' => 'event_logs · 500 MB · ~1.0K rows'])
+        ->expectsQuestion('Any other tables to filter, empty or skip? (type to search, Enter for none)', 'users')
+        ->expectsChoice('Any other tables to filter, empty or skip? (type to search, Enter for none)', ['users'], ['users' => 'users · 1.0 MB · ~10 rows'])
         ->expectsChoice('event_logs (500 MB, ~1.0K rows)', 'recent', modeOptions(TableMode::cases()))
         ->expectsChoice('How much of event_logs?', '3', [
             '1' => 'Last 1 months', '3' => 'Last 3 months', '6' => 'Last 6 months', '12' => 'Last 12 months', '24' => 'Last 24 months', 'since' => 'Since a fixed date…',
         ])
         ->expectsChoice('users (1.0 MB, ~10 rows)', 'schema', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
-        ->expectsQuestion('Save as profile', $saveAs);
+        ->expectsConfirmation("Save profile [{$saveAs}]?", 'yes');
 }
 
-it('saves under the name given at the end and offers an index migration', function () {
+it('saves the profile it edits and offers an index migration', function () {
     prepareConfigure($this->workspace);
 
-    configureEventLogs($this->artisan('snapshot:configure'), 'nightly')
+    configureEventLogs($this->artisan('snapshot:configure', ['profile' => 'nightly']), 'nightly')
         ->expectsConfirmation('Generate a migration that adds these indexes?', 'yes')
         ->assertSuccessful();
 
@@ -52,16 +52,21 @@ it('saves under the name given at the end and offers an index migration', functi
         ->and(File::glob($this->workspace.'/database/migrations/*_add_snapshot_date_indexes.php'))->toHaveCount(1);
 });
 
-it('does not overwrite another existing profile without asking', function () {
+it('edits a copy and leaves the original profile alone', function () {
     prepareConfigure($this->workspace);
     File::ensureDirectoryExists($this->workspace.'/profiles');
     File::put($this->workspace.'/profiles/nightly.json', '{"default_mode":"schema","tables":{}}');
 
-    configureEventLogs($this->artisan('snapshot:configure'), 'nightly')
-        ->expectsConfirmation('Profile [nightly] already exists. Overwrite it?', 'no')
-        ->assertFailed();
+    configureEventLogs($this->artisan('snapshot:configure', ['profile' => 'weekly', '--from' => 'nightly']), 'weekly')
+        ->expectsOutputToContain('Starting from a copy of [nightly]')
+        ->expectsConfirmation('Generate a migration that adds these indexes?', 'no')
+        ->assertSuccessful();
 
-    expect(File::get($this->workspace.'/profiles/nightly.json'))->toBe('{"default_mode":"schema","tables":{}}');
+    $copy = Profile::load($this->workspace.'/profiles', 'weekly');
+
+    expect($copy->defaultMode)->toBe(TableMode::Schema)
+        ->and($copy->ruleFor('event_logs')->mode)->toBe(TableMode::Recent)
+        ->and(File::get($this->workspace.'/profiles/nightly.json'))->toBe('{"default_mode":"schema","tables":{}}');
 });
 
 it('skips the large tables question when no table is large', function () {
@@ -73,10 +78,10 @@ it('skips the large tables question when no table is large', function () {
 
     $this->artisan('snapshot:configure')
         ->expectsOutputToContain('No table is 100 MB or larger.')
-        ->expectsQuestion('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', 'users')
-        ->expectsChoice('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', ['users'], ['users' => 'users · 1.0 MB · ~10 rows'])
+        ->expectsQuestion('Any other tables to filter, empty or skip? (type to search, Enter for none)', 'users')
+        ->expectsChoice('Any other tables to filter, empty or skip? (type to search, Enter for none)', ['users'], ['users' => 'users · 1.0 MB · ~10 rows'])
         ->expectsChoice('users (1.0 MB, ~10 rows)', 'schema', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
-        ->expectsQuestion('Save as profile', 'default')
+        ->expectsConfirmation('Save profile [default]?', 'yes')
         ->assertSuccessful();
 
     expect(Profile::load($this->workspace.'/profiles', 'default')->ruleFor('users')->describe())->toBe('schema');
@@ -95,8 +100,8 @@ it('suggests personal data columns to anonymize and saves the choice', function 
     ]))->save($this->workspace.'/analysis.json');
 
     $this->artisan('snapshot:configure')
-        ->expectsQuestion('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', 'orders')
-        ->expectsChoice('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', ['orders'], ['orders' => 'orders · 1.0 KB · ~10 rows'])
+        ->expectsQuestion('Any other tables to filter, empty or skip? (type to search, Enter for none)', 'orders')
+        ->expectsChoice('Any other tables to filter, empty or skip? (type to search, Enter for none)', ['orders'], ['orders' => 'orders · 1.0 KB · ~10 rows'])
         ->expectsChoice('orders (1.0 KB, ~10 rows)', 'full', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
         ->expectsChoice('Anonymize these columns (personal data)', ['orders.customer_email', 'orders.customer_name'], [
             'orders.customer_email' => 'orders.customer_email → email',
@@ -112,7 +117,7 @@ it('suggests personal data columns to anonymize and saves the choice', function 
             'empty' => "Empty string ''",
         ])
         ->expectsQuestion('Template for orders.number', 'Order {id}')
-        ->expectsQuestion('Save as profile', 'default')
+        ->expectsConfirmation('Save profile [default]?', 'yes')
         ->assertSuccessful();
 
     expect(Profile::load($this->workspace.'/profiles', 'default')->ruleFor('orders')->toArray())->toBe([
@@ -135,22 +140,24 @@ it('remembers unchecked suggestions as not personal and shows them unchecked nex
         ], personalData: ['email' => new ColumnRule(AnonymizeStrategy::Email)]),
     ]))->save($this->workspace.'/analysis.json');
 
-    $run = fn (bool $again) => $this->artisan('snapshot:configure')
-        ->expectsQuestion('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', 'companies')
-        ->expectsChoice('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', ['companies'], ['companies' => 'companies · 1.0 KB · ~10 rows'.($again ? ' · now: full' : '')])
-        ->when($again, fn ($command) => $command->expectsConfirmation('Keep the existing rules for companies?', 'yes'))
+    $run = fn (bool $again) => $this->artisan('snapshot:configure', ['profile' => 'default'])
+        ->when(! $again, fn ($command) => $command
+            ->expectsQuestion('Any other tables to filter, empty or skip? (type to search, Enter for none)', 'companies')
+            ->expectsChoice('Any other tables to filter, empty or skip? (type to search, Enter for none)', ['companies'], ['companies' => 'companies · 1.0 KB · ~10 rows']))
+        ->when($again, fn ($command) => $command
+            ->expectsChoice('Tables that should NOT be copied in full', ['companies'], ['companies' => 'companies · 1.0 KB · ~10 rows · now: full']))
         ->expectsChoice('companies (1.0 KB, ~10 rows)', 'full', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]));
 
     $run(false)
         ->expectsChoice('Anonymize these columns (personal data)', [], ['companies.email' => 'companies.email → email'])
-        ->expectsQuestion('Save as profile', 'default')
+        ->expectsConfirmation('Save profile [default]?', 'yes')
         ->assertSuccessful();
 
     expect(Profile::load($this->workspace.'/profiles', 'default')->notPersonal)->toBe(['companies.email']);
 
     $run(true)
         ->expectsChoice('Anonymize these columns (personal data)', ['companies.email'], ['companies.email' => 'companies.email → email (marked not personal)'])
-        ->expectsQuestion('Save as profile', 'default')
+        ->expectsConfirmation('Save profile [default]?', 'yes')
         ->assertSuccessful();
 
     $profile = Profile::load($this->workspace.'/profiles', 'default');
@@ -170,12 +177,10 @@ it('skips the anonymize step when anonymization is off and keeps existing rules'
     ]))->save($this->workspace.'/analysis.json');
     (new Profile('default', tables: ['companies' => TableRule::fromArray(['mode' => 'full', 'anonymize' => ['email' => 'email']])]))->save($this->workspace.'/profiles');
 
-    $this->artisan('snapshot:configure')
-        ->expectsQuestion('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', 'companies')
-        ->expectsChoice('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', ['companies'], ['companies' => 'companies · 1.0 KB · ~10 rows · now: full, anonymizes email'])
-        ->expectsConfirmation('Keep the existing rules for companies?', 'yes')
+    $this->artisan('snapshot:configure', ['profile' => 'default'])
+        ->expectsChoice('Tables that should NOT be copied in full', ['companies'], ['companies' => 'companies · 1.0 KB · ~10 rows · now: full, anonymizes email'])
         ->expectsChoice('companies (1.0 KB, ~10 rows)', 'full', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
-        ->expectsQuestion('Save as profile', 'default')
+        ->expectsConfirmation('Save profile [default]?', 'yes')
         ->assertSuccessful();
 
     expect(Profile::load($this->workspace.'/profiles', 'default')->ruleFor('companies')->anonymize)->toHaveKey('email');
@@ -189,11 +194,11 @@ it('says everything is copied in full instead of showing an empty summary', func
     ]))->save($this->workspace.'/analysis.json');
 
     $this->artisan('snapshot:configure')
-        ->expectsQuestion('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', 'users')
-        ->expectsChoice('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', ['users'], ['users' => 'users · 1.0 MB · ~10 rows'])
+        ->expectsQuestion('Any other tables to filter, empty or skip? (type to search, Enter for none)', 'users')
+        ->expectsChoice('Any other tables to filter, empty or skip? (type to search, Enter for none)', ['users'], ['users' => 'users · 1.0 MB · ~10 rows'])
         ->expectsChoice('users (1.0 MB, ~10 rows)', 'full', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
         ->expectsOutputToContain('All tables are copied in full.')
         ->doesntExpectOutputToContain('In snapshot')
-        ->expectsQuestion('Save as profile', 'default')
+        ->expectsConfirmation('Save profile [default]?', 'yes')
         ->assertSuccessful();
 });

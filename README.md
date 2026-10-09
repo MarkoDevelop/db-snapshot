@@ -26,6 +26,7 @@ php artisan snapshot:restore     # drop + recreate the local DB from the latest 
 php artisan snapshot:refresh     # later on: refresh a whole profile, or just some tables
 php artisan snapshot:refresh-table orders users   # pull + replace only these tables
 php artisan snapshot:list
+php artisan snapshot:profiles    # saved profiles with their rules and last pull
 ```
 
 ## Why
@@ -82,7 +83,26 @@ The remote password goes to the SSH session's stdin and is exported there (as `M
 
 ## Profiles
 
-`snapshot:configure [profile]` writes `database/snapshot-profiles/<profile>.json`:
+`snapshot:configure [profile]` writes `database/snapshot-profiles/<profile>.json`.
+
+Every command takes `--profile=` (`snapshot:configure` also accepts the name as an argument). Without one, the command asks **Which profile?**. Each profile is listed with its details:
+
+```
+Which profile?
+› default · 12 rules · anonymizes 4 columns · pulled 2 hours ago
+  nightly · 3 rules · never pulled
+  New profile…
+  Copy a profile…
+```
+
+- `snapshot:configure` asks as soon as one profile exists. **New profile…** starts empty, and **Copy a profile…** starts from a copy, leaving the original as it is (or pass `--from=nightly`). Saving asks *Save profile [name]?*.
+- `snapshot` offers the same list, and the read-only commands (`pull`, `refresh`, `refresh-table`) show it without the New and Copy entries. These ask only when there are several profiles; with one, it's used.
+- With more than 7 profiles the list becomes searchable.
+- With no profiles, or with `--no-interaction`, `default` is used.
+
+`snapshot:profiles` lists every profile with the same details. Profiles are plain JSON files, so remove or rename them like any file.
+
+A profile looks like this:
 
 ```json
 {
@@ -108,7 +128,7 @@ The remote password goes to the SSH session's stdin and is exported there (as `M
 
 Tables the profile doesn't list use `default_mode`, so a new table on the server is never silently dropped. `months` is relative, so a profile stays current without editing.
 
-In `snapshot:configure`, large tables (over `large_table_mb`, 200 MB by default) are listed first with their size, row count and indexed date columns. Any other table can be found by typing its name. For `recent` rules, each period option shows an estimated size, and a summary table shows the expected snapshot size before you save.
+In `snapshot:configure`, large tables (over `large_table_mb`, 200 MB by default) and tables that already have a rule are listed first, with their size, row count and indexed date columns. Existing rules are preselected. Any other table can be found by typing its name. For `recent` rules, each period option shows an estimated size, and a summary table shows the expected snapshot size before you save.
 
 At the end you choose the name to save under, so one run can turn `default` into a new `nightly` profile. A different existing profile is only overwritten after you confirm.
 

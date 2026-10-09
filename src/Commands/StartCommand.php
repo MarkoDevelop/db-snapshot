@@ -23,10 +23,12 @@ use function Laravel\Prompts\warning;
 
 class StartCommand extends Command
 {
+    use ChoosesProfile;
+    use TargetsLocalDatabase;
     use UsesAnalysis;
 
     protected $signature = 'snapshot
-        {--profile=default : Profile to use}
+        {--profile= : Profile to use (asked when there are several)}
         {--analyze : Re-read the remote database}
         {--fresh : Re-analyze the remote database and edit the profile, even if both exist}';
 
@@ -64,9 +66,9 @@ class StartCommand extends Command
             return self::FAILURE;
         }
 
-        $profile = (string) $this->option('profile');
+        [$profile, $copyFrom] = $this->pickProfile($this->option('profile'), offerNew: true);
 
-        if (! $this->ensureProfile($profile)) {
+        if (! $this->ensureProfile($profile, $copyFrom)) {
             return self::FAILURE;
         }
 
@@ -80,7 +82,7 @@ class StartCommand extends Command
             return self::FAILURE;
         }
 
-        $connection = config('database.connections.'.(config('db-snapshot.connection') ?? config('database.default')));
+        $connection = $this->localConnection();
 
         if (! confirm("Restore it into {$connection['database']} now? This drops and recreates the database.", default: false)) {
             outro("Restore later with: php artisan snapshot:restore latest --profile={$profile}");
@@ -177,7 +179,7 @@ class StartCommand extends Command
         return true;
     }
 
-    private function ensureProfile(string $profile): bool
+    private function ensureProfile(string $profile, ?string $copyFrom): bool
     {
         $exists = file_exists(Profile::path(config('db-snapshot.profile_path'), $profile));
 
@@ -186,6 +188,6 @@ class StartCommand extends Command
             options: ['use' => 'Use it as it is', 'edit' => 'Edit it first'],
         ) === 'edit';
 
-        return ! $edit || $this->call('snapshot:configure', ['profile' => $profile]) === self::SUCCESS;
+        return ! $edit || $this->call('snapshot:configure', array_filter(['profile' => $profile, '--from' => $copyFrom])) === self::SUCCESS;
     }
 }

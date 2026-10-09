@@ -15,7 +15,7 @@ it('pulls the chosen profile and then restores it', function () {
             'profile' => 'The whole database, from a profile (pull + restore)',
             'tables' => 'Just some tables (the rest of the database stays as it is)',
         ])
-        ->expectsChoice('Which profile?', 'nightly', ['default' => 'default', 'nightly' => 'nightly'])
+        ->expectsChoice('Which profile?', 'nightly', ['default' => 'default · 1 rule · never pulled', 'nightly' => 'nightly · 0 rules · never pulled'])
         ->expectsChoice('Restore into which database?', 'app', [
             'app' => "dev_app (the app's database)",
             'new' => 'production_'.now()->format('Y_m_d').' (a database for this snapshot)',
@@ -37,7 +37,7 @@ it('hands tables given as arguments to refresh-table', function () {
     Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'DROP DATABASE'));
 });
 
-it('points to snapshot:configure when there are no profiles', function () {
+it('offers to create the default profile when there are none', function () {
     prepareRefresh($this->workspace);
     File::deleteDirectory($this->workspace.'/profiles');
 
@@ -46,8 +46,9 @@ it('points to snapshot:configure when there are no profiles', function () {
             'profile' => 'The whole database, from a profile (pull + restore)',
             'tables' => 'Just some tables (the rest of the database stays as it is)',
         ])
-        ->expectsOutputToContain('Create one with: php artisan snapshot:configure')
+        ->expectsConfirmation("Profile [default] doesn't exist yet. Create it now?", 'no')
+        ->expectsOutputToContain('Run snapshot:configure default first')
         ->assertFailed();
 
-    Process::assertNothingRan();
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'mysqldump'));
 });

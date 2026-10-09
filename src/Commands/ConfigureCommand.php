@@ -31,10 +31,13 @@ use function Laravel\Prompts\warning;
 class ConfigureCommand extends Command
 {
     use AsksTableRules;
+    use ChoosesProfile;
     use UsesAnalysis;
 
     protected $signature = 'snapshot:configure
-        {profile=default : Profile name (saved as <profile>.json)}
+        {profile? : Profile name (asked when there are several; saved as <profile>.json)}
+        {--profile= : The same as the profile argument}
+        {--from= : Start from a copy of this profile}
         {--analyze : Re-read the remote database first}';
 
     protected $description = 'Choose which tables a snapshot contains and how much of each';
@@ -49,47 +52,52 @@ class ConfigureCommand extends Command
             return self::FAILURE;
         }
 
-        $profileName = (string) $this->argument('profile');
+        [$profileName, $copyFrom] = $this->pickProfile($this->argument('profile') ?: $this->option('profile'), offerNew: true, askWithOne: true);
+        $copyFrom = $this->option('from') ?: $copyFrom;
         $profileDirectory = config('db-snapshot.profile_path');
-        $existing = File::exists(Profile::path($profileDirectory, $profileName))
-            ? Profile::load($profileDirectory, $profileName)
-            : new Profile($profileName);
+        $source = $copyFrom ?? $profileName;
+        $loaded = File::exists(Profile::path($profileDirectory, $source)) ? Profile::load($profileDirectory, $source) : null;
 
-        $rules = $this->existingRules($existing, $analysis);
-        $largeBytes = (int) config('db-snapshot.large_table_mb') * 1024 * 1024;
-        $baseTables = array_filter($analysis->tables, fn (TableInfo $table): bool => ! $table->isView);
+        if ($copyFrom !== null && $loaded === null) {
+            error("Profile [{$copyFrom}] doesn't exist, so there is nothing to copy.");
 
-        $large = array_filter($baseTables, fn (TableInfo $table): bool => $table->bytes() >= $largeBytes);
-        $selected = $large === [] ? [] : multiselect(
-            label: 'Large tables that should NOT be copied in full',
-            options: array_map(fn (TableInfo $table): string => $this->tableLabel($table, $rules[$table->name] ?? null), $large),
-            default: array_values(array_intersect(array_keys($large), array_keys($rules))),
-            scroll: 15,
-            hint: 'Space to toggle. Unselected tables are copied in full.',
-        );
-
-        if ($large === []) {
-            note('No table is '.config('db-snapshot.large_table_mb').' MB or larger.');
+            return self::FAILURE;
         }
 
-        $others = array_diff_key($baseTables, $large);
-        $selected = [...$selected, ...multisearch(
-            label: 'Any smaller tables to filter, empty or skip? (type to search, Enter for none)',
+        $existing = new Profile($profileName, $loaded->defaultMode ?? TableMode::Full, $loaded->tables ?? [], $loaded->notPersonal ?? []);
+
+        if ($copyFrom !== null) {
+            note("Starting from a copy of [{$copyFrom}]; it stays as it is.");
+        }
+
+        $rules = $this->existingRules($existing, $analysis);
+        $largeMb = (int) config('db-snapshot.large_table_mb');
+        $baseTables = array_filter($analysis->tables, fn (TableInfo $table): bool => ! $table->isView);
+
+        // Large tables and tables that already have a rule, with the rules preselected.
+        $listed = array_filter($baseTables, fn (TableInfo $table): bool => $table->bytes() >= $largeMb * 1024 * 1024 || isset($rules[$table->name]));
+        $selected = $listed === [] ? [] : multiselect(
+            label: 'Tables that should NOT be copied in full',
+            options: array_map(fn (TableInfo $table): string => $this->tableLabel($table, $rules[$table->name] ?? null), $listed),
+            default: array_values(array_intersect(array_keys($listed), array_keys($rules))),
+            scroll: 15,
+            hint: "Tables of {$largeMb} MB or more and tables with rules. Space to toggle; unselected ones are copied in full.",
+        );
+
+        if ($listed === []) {
+            note("No table is {$largeMb} MB or larger.");
+        }
+
+        $others = array_diff_key($baseTables, $listed);
+        $selected = [...$selected, ...($others === [] ? [] : multisearch(
+            label: 'Any other tables to filter, empty or skip? (type to search, Enter for none)',
             options: fn (string $search): array => array_map(
-                fn (TableInfo $table): string => $this->tableLabel($table, $rules[$table->name] ?? null),
+                fn (TableInfo $table): string => $this->tableLabel($table, null),
                 array_filter($others, fn (TableInfo $table): bool => $search === '' || str_contains($table->name, $search)),
             ),
             placeholder: 'e.g. failed_jobs',
             scroll: 15,
-        )];
-
-        $smallWithRules = array_intersect_key($rules, $others);
-
-        if ($smallWithRules !== [] && confirm(
-            label: 'Keep the existing rules for '.implode(', ', array_keys($smallWithRules)).'?',
-        )) {
-            $selected = array_values(array_unique([...$selected, ...array_keys($smallWithRules)]));
-        }
+        ))];
 
         $newRules = [];
 
@@ -104,16 +112,14 @@ class ConfigureCommand extends Command
 
         $this->summary($analysis, new Profile($profileName, $existing->defaultMode, $newRules, $notPersonal));
 
-        $saveAs = $this->askProfileName($profileDirectory, $profileName);
-
-        if ($saveAs === null) {
-            warning('Nothing saved.');
+        if (! confirm("Save profile [{$profileName}]?")) {
+            info('Nothing changed.');
 
             return self::FAILURE;
         }
 
-        $profile = new Profile($saveAs, $existing->defaultMode, $newRules, $notPersonal);
-        info('Saved '.$profile->save($profileDirectory).". Pull it with: php artisan snapshot:pull --profile={$saveAs}");
+        $profile = new Profile($profileName, $existing->defaultMode, $newRules, $notPersonal);
+        info('Saved '.$profile->save($profileDirectory).". Pull it with: php artisan snapshot:pull --profile={$profileName}");
 
         $this->offerIndexMigration($profile, $analysis);
 
@@ -301,24 +307,6 @@ class ConfigureCommand extends Command
             AnonymizeStrategy::Fixed => new ColumnRule($strategy, text(label: "Value for every {$key}", required: true)),
             default => new ColumnRule($strategy),
         };
-    }
-
-    private function askProfileName(string $directory, string $current): ?string
-    {
-        $name = text(
-            label: 'Save as profile',
-            default: $current,
-            required: true,
-            validate: fn (string $value): ?string => preg_match('/^[A-Za-z0-9_-]+$/', $value) ? null : 'Use letters, digits, - and _ only.',
-            hint: 'Saved to '.Profile::path($directory, '<name>'),
-        );
-
-        if ($name !== $current && File::exists(Profile::path($directory, $name))
-            && ! confirm("Profile [{$name}] already exists. Overwrite it?", default: false)) {
-            return null;
-        }
-
-        return $name;
     }
 
     private function offerIndexMigration(Profile $profile, Analysis $analysis): void
