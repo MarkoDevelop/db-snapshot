@@ -7,12 +7,13 @@ use Illuminate\Support\Facades\Process;
 use InvalidArgumentException;
 use Overthink\DbSnapshot\Analysis\DateColumn;
 use Overthink\DbSnapshot\Analysis\TableInfo;
+use Overthink\DbSnapshot\Contracts\RetriesConflictingImports;
 
 /**
  * MySQL and MariaDB: information_schema, mysqldump on the server and the
  * mysql client locally.
  */
-class MysqlDriver extends SshDriver
+class MysqlDriver extends SshDriver implements RetriesConflictingImports
 {
     /**
      * Dumps from a GTID-enabled server start with SET @@GLOBAL.GTID_PURGED.
@@ -177,6 +178,15 @@ class MysqlDriver extends SshDriver
         ]));
 
         return ['bash', '-o', 'pipefail', '-c', 'gzip -dc '.escapeshellarg($file).' | '.self::STRIP_GTID_PURGED.' | '.$client];
+    }
+
+    /**
+     * Creating tables with foreign keys locks the referenced tables' metadata,
+     * so parallel imports can deadlock (1213) or time out waiting (1205).
+     */
+    public function isLockConflict(string $errorOutput): bool
+    {
+        return (bool) preg_match('/ERROR (1213|1205) /', $errorOutput);
     }
 
     public function localEnvironment(array $connection): array

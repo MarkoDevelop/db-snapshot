@@ -85,3 +85,8 @@ it('drops statements older psql rejects and creates foreign keys NOT VALID', fun
             '',
         ]));
 });
+
+it('treats deadlocks between parallel imports as conflicts to retry', function () {
+    expect(pgsqlDriver()->isLockConflict('psql:<stdin>:3: ERROR:  deadlock detected'))->toBeTrue()
+        ->and(pgsqlDriver()->isLockConflict('psql:<stdin>:3: ERROR:  relation "users" does not exist'))->toBeFalse();
+});

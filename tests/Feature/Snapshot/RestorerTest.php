@@ -130,3 +130,45 @@ it('applies post-data after the tables and reports what failed as warnings', fun
         ->and($commands[2])->toContain(Snapshot::POST_DATA_FILE)
         ->and($warnings)->toBe(["Some indexes or constraints could not be created:\n  psql:<stdin>:12: ERROR:  relation \"skipped\" does not exist"]);
 });
+
+it('retries a table whose import deadlocked with another one', function () {
+    Sleep::fake();
+    Process::fake([
+        '*users.sql.gz*' => Process::sequence()
+            ->push(Process::result(errorOutput: 'ERROR 1213 (40001) at line 34: Deadlock found when trying to get lock; try restarting transaction', exitCode: 1))
+            ->push(Process::result()),
+        '*' => Process::result(),
+    ]);
+    $snapshot = makeSnapshot($this->workspace.'/snap', ['users' => 1, 'orders' => 1], withRoutines: false);
+
+    app(Restorer::class)->restore($snapshot, localConnection(), 2);
+
+    Process::assertRanTimes(fn ($process) => str_contains(commandLine($process), 'users.sql.gz'), 2);
+    Process::assertRanTimes(fn ($process) => str_contains(commandLine($process), 'orders.sql.gz'), 1);
+});
+
+it('does not retry imports that failed for other reasons', function () {
+    Sleep::fake();
+    Process::fake([
+        '*users.sql.gz*' => Process::result(errorOutput: 'ERROR 1062 (23000) at line 40: Duplicate entry', exitCode: 1),
+        '*' => Process::result(),
+    ]);
+    $snapshot = makeSnapshot($this->workspace.'/snap', ['users' => 1], withRoutines: false);
+
+    expect(fn () => app(Restorer::class)->restore($snapshot, localConnection(), 1))->toThrow(RuntimeException::class, 'Duplicate entry');
+
+    Process::assertRanTimes(fn ($process) => str_contains(commandLine($process), 'users.sql.gz'), 1);
+});
+
+it('gives up on a table that keeps deadlocking', function () {
+    Sleep::fake();
+    Process::fake([
+        '*users.sql.gz*' => Process::result(errorOutput: 'ERROR 1213 (40001) at line 34: Deadlock found when trying to get lock', exitCode: 1),
+        '*' => Process::result(),
+    ]);
+    $snapshot = makeSnapshot($this->workspace.'/snap', ['users' => 1], withRoutines: false);
+
+    expect(fn () => app(Restorer::class)->restore($snapshot, localConnection(), 1))->toThrow(RuntimeException::class, 'users: ERROR 1213');
+
+    Process::assertRanTimes(fn ($process) => str_contains(commandLine($process), 'users.sql.gz'), 4);
+});
