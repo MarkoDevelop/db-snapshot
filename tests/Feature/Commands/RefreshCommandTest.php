@@ -21,7 +21,7 @@ it('pulls the chosen profile and then restores it', function () {
             'new' => 'production_'.now()->format('Y_m_d').' (a database for this snapshot)',
             'other' => 'Another name…',
         ])
-        ->expectsConfirmation('Drop and recreate dev_app on mysql:3306?', 'yes')
+        ->expectsConfirmation('Pull [nightly] and drop and recreate dev_app with it?', 'yes')
         ->assertSuccessful();
 
     expect(app(SnapshotRepository::class)->find()->profile())->toBe('nightly');
@@ -46,9 +46,35 @@ it('offers to create the default profile when there are none', function () {
             'profile' => 'The whole database, from a profile (pull + restore)',
             'tables' => 'Just some tables (the rest of the database stays as it is)',
         ])
+        ->expectsChoice('Restore into which database?', 'app', [
+            'app' => "dev_app (the app's database)",
+            'new' => 'production_'.now()->format('Y_m_d').' (a database for this snapshot)',
+            'other' => 'Another name…',
+        ])
+        ->expectsConfirmation('Pull [default] and drop and recreate dev_app with it?', 'yes')
         ->expectsConfirmation("Profile [default] doesn't exist yet. Create it now?", 'no')
         ->expectsOutputToContain('Run snapshot:configure default first')
         ->assertFailed();
 
     Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'mysqldump'));
+});
+
+it('asks everything before pulling, then pulls and restores into a new database unattended', function () {
+    prepareRefresh($this->workspace);
+    app()->useEnvironmentPath($this->workspace);
+    File::put($this->workspace.'/.env', "DB_DATABASE=dev_app\n");
+    $newDatabase = 'production_'.now()->format('Y_m_d');
+
+    $this->artisan('snapshot:refresh', ['--profile' => 'default'])
+        ->expectsChoice('Restore into which database?', 'new', [
+            'app' => "dev_app (the app's database)",
+            'new' => "{$newDatabase} (a database for this snapshot)",
+            'other' => 'Another name…',
+        ])
+        ->expectsConfirmation("Pull [default] and drop and recreate {$newDatabase} with it?", 'yes')
+        ->expectsConfirmation("Point the app at {$newDatabase} once it is restored? (sets DB_DATABASE in {$this->workspace}/.env)", 'yes')
+        ->assertSuccessful();
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), "CREATE DATABASE `{$newDatabase}`"));
+    expect(File::get($this->workspace.'/.env'))->toBe("DB_DATABASE={$newDatabase}\n");
 });

@@ -66,7 +66,7 @@ it('pulls with an existing profile and stops before restoring when declined', fu
         ->expectsOutputToContain('Connected: mysql 8.4.8')
         ->expectsChoice('Profile [default] exists. What now?', 'use', ['use' => 'Use it as it is', 'edit' => 'Edit it first'])
         ->expectsConfirmation('Pull a snapshot with profile [default] now?', 'yes')
-        ->expectsConfirmation('Restore it into dev_app now? This drops and recreates the database.', 'no')
+        ->expectsConfirmation('Restore it into dev_app afterwards? This drops and recreates the database.', 'no')
         ->assertSuccessful();
 
     expect(app(SnapshotRepository::class)->find('latest', 'default')->manifest['tables'])->toHaveKey('orders');

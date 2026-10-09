@@ -2,6 +2,7 @@
 
 namespace Overthink\DbSnapshot\Support;
 
+use Carbon\CarbonImmutable;
 use InvalidArgumentException;
 use Overthink\DbSnapshot\Snapshot\Snapshot;
 
@@ -17,11 +18,19 @@ final class DatabaseName
      */
     public static function resolve(string $template, Snapshot $snapshot, string $localDatabase): string
     {
+        return self::resolveFor($template, $snapshot->manifest['database'], $snapshot->profile(), $snapshot->createdAt(), $localDatabase);
+    }
+
+    /**
+     * The same, before the snapshot exists (e.g. to ask where to restore before pulling).
+     */
+    public static function resolveFor(string $template, string $source, string $profile, CarbonImmutable $pulledAt, string $localDatabase): string
+    {
         $name = strtr($template, [
-            '{source}' => $snapshot->manifest['database'],
-            '{profile}' => $snapshot->profile(),
-            '{date}' => $snapshot->createdAt()->format('Y_m_d'),
-            '{time}' => $snapshot->createdAt()->format('His'),
+            '{source}' => $source,
+            '{profile}' => $profile,
+            '{date}' => $pulledAt->format('Y_m_d'),
+            '{time}' => $pulledAt->format('His'),
             '{database}' => $localDatabase,
         ]);
 
