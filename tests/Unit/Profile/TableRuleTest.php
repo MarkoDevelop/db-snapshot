@@ -4,26 +4,21 @@ use Carbon\CarbonImmutable;
 use Overthink\DbSnapshot\Profile\TableMode;
 use Overthink\DbSnapshot\Profile\TableRule;
 
-it('limits a recent rule to whole days counted back from now', function () {
+it('counts a recent rule back from now in whole days', function () {
     $rule = new TableRule(TableMode::Recent, 'created_at', months: 3);
 
-    expect($rule->whereClause(CarbonImmutable::parse('2026-05-31 15:20:00')))
-        ->toBe("`created_at` >= '2026-02-28 00:00:00'");
+    expect($rule->sinceDate(CarbonImmutable::parse('2026-05-31 15:20:00'))->format('Y-m-d H:i:s'))->toBe('2026-02-28 00:00:00');
 });
 
-it('limits a recent rule with a fixed date to that date', function () {
+it('starts a recent rule with a fixed date at that date', function () {
     $rule = new TableRule(TableMode::Recent, 'logged_at', since: '2025-01-15');
 
-    expect($rule->whereClause())->toBe("`logged_at` >= '2025-01-15 00:00:00'");
+    expect($rule->sinceDate()->format('Y-m-d H:i:s'))->toBe('2025-01-15 00:00:00');
 });
 
-it('passes a custom where clause through unchanged', function () {
-    expect((new TableRule(TableMode::Where, where: 'id > 1000'))->whereClause())->toBe('id > 1000');
-});
-
-it('has no where clause for full and schema rules', function (TableMode $mode) {
-    expect((new TableRule($mode))->whereClause())->toBeNull();
-})->with([TableMode::Full, TableMode::Schema]);
+it('has no start date for other rules', function (TableMode $mode) {
+    expect((new TableRule($mode))->sinceDate())->toBeNull();
+})->with([TableMode::Full, TableMode::Schema, TableMode::Skip]);
 
 it('rejects incomplete or unsafe rules', function (array $data) {
     TableRule::fromArray($data);

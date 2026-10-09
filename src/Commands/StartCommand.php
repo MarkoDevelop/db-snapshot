@@ -4,8 +4,9 @@ namespace Overthink\DbSnapshot\Commands;
 
 use Illuminate\Console\Command;
 use Overthink\DbSnapshot\Analysis\Analyzer;
+use Overthink\DbSnapshot\Contracts\Driver;
+use Overthink\DbSnapshot\DriverManager;
 use Overthink\DbSnapshot\Profile\Profile;
-use Overthink\DbSnapshot\Remote\RemoteMysql;
 use Overthink\DbSnapshot\Support\EnvFile;
 use Throwable;
 
@@ -40,9 +41,9 @@ class StartCommand extends Command
         'SNAPSHOT_SSH_USER' => ['ssh.user', 'SSH user', 'root'],
         'SNAPSHOT_SSH_PORT' => ['ssh.port', 'SSH port', '22'],
         'SNAPSHOT_SSH_KEY' => ['ssh.key', 'Path to the SSH private key (as seen by this machine)', ''],
-        'SNAPSHOT_REMOTE_DB_HOST' => ['remote.host', 'MySQL host, as seen from the server', '127.0.0.1'],
-        'SNAPSHOT_REMOTE_DB_PORT' => ['remote.port', 'MySQL port', '3306'],
-        'SNAPSHOT_REMOTE_DB_USERNAME' => ['remote.username', 'MySQL user', 'root'],
+        'SNAPSHOT_REMOTE_DB_HOST' => ['remote.host', 'Database host, as seen from the server', '127.0.0.1'],
+        'SNAPSHOT_REMOTE_DB_PORT' => ['remote.port', 'Database port', ':port'],
+        'SNAPSHOT_REMOTE_DB_USERNAME' => ['remote.username', 'Database user', ':username'],
         'SNAPSHOT_REMOTE_DB_DATABASE' => ['remote.database', 'Database to snapshot', ''],
     ];
 
@@ -103,10 +104,25 @@ class StartCommand extends Command
 
         warning('The connection to the remote database is not configured yet.');
 
+        $manager = $this->laravel->make(DriverManager::class);
+        $available = $manager->available();
         $values = [];
+
+        $values['SNAPSHOT_DRIVER'] = count($available) === 1 ? $available[0] : (string) select(
+            label: 'Database driver',
+            options: array_combine($available, $available),
+            default: in_array(config('db-snapshot.driver'), $available, true) ? config('db-snapshot.driver') : $available[0],
+        );
+
+        $defaults = $manager->driver($values['SNAPSHOT_DRIVER'])->defaults();
 
         foreach (self::SETTINGS as $envKey => [$configKey, $label, $default]) {
             $current = (string) config("db-snapshot.{$configKey}");
+            $default = match ($default) {
+                ':port' => (string) $defaults['port'],
+                ':username' => $defaults['username'],
+                default => $default,
+            };
 
             $values[$envKey] = text(
                 label: $label,
@@ -116,8 +132,8 @@ class StartCommand extends Command
         }
 
         $values['SNAPSHOT_REMOTE_DB_PASSWORD'] = password(
-            label: 'MySQL password',
-            hint: 'Leave empty to use ~/.my.cnf on the server.',
+            label: 'Database password',
+            hint: 'Leave empty to use the client config of the server user (e.g. ~/.my.cnf).',
         );
 
         foreach (self::SETTINGS as $envKey => [$configKey]) {
@@ -125,6 +141,8 @@ class StartCommand extends Command
         }
 
         config()->set('db-snapshot.remote.password', $values['SNAPSHOT_REMOTE_DB_PASSWORD']);
+        config()->set('db-snapshot.driver', $values['SNAPSHOT_DRIVER']);
+        $manager->forgetDrivers();
 
         $envPath = $this->laravel->environmentFilePath();
 
@@ -139,16 +157,16 @@ class StartCommand extends Command
     private function checkConnection(): bool
     {
         try {
-            $mysql = $this->laravel->make(RemoteMysql::class);
-            $version = spin(fn (): ?string => $mysql->select('SELECT VERSION()')[0][0] ?? null, 'Connecting over SSH…');
+            $driver = $this->laravel->make(Driver::class);
+            $version = spin(fn (): string => $driver->serverVersion(), 'Connecting over SSH…');
         } catch (Throwable $exception) {
             error($exception->getMessage());
-            warning('Check that the SSH key exists and is readable (chmod 600), that the server accepts it, and the MySQL credentials.');
+            warning('Check that the SSH key exists and is readable (chmod 600), that the server accepts it, and the database credentials.');
 
             return false;
         }
 
-        info("Connected: MySQL {$version} on ".config('db-snapshot.ssh.host').', database '.config('db-snapshot.remote.database').'.');
+        info("Connected: {$driver->name()} {$version} on ".config('db-snapshot.ssh.host').', database '.config('db-snapshot.remote.database').'.');
 
         return true;
     }

@@ -48,8 +48,9 @@ abstract class TestCase extends Orchestra
             'password' => 's3cret',
             'database' => 'production',
             'nice' => '',
-            'dump_options' => ['--single-transaction'],
         ]);
+
+        $app['config']->set('db-snapshot.drivers.mysql.dump_options', ['--single-transaction']);
 
         $app['config']->set('db-snapshot.path', $this->workspace.'/snapshots');
         $app['config']->set('db-snapshot.profile_path', $this->workspace.'/profiles');

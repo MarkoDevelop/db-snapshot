@@ -10,7 +10,7 @@ use Overthink\DbSnapshot\Profile\TableMode;
 
 /**
  * A migration adding indexes to the date columns that "recent" rules filter
- * on, so mysqldump --where doesn't have to scan the whole table on the server.
+ * on, so the dump on the server doesn't have to scan whole tables.
  */
 final class IndexMigration
 {
@@ -66,8 +66,8 @@ final class IndexMigration
          * Indexes the date columns that db-snapshot profiles filter on, so
          * snapshot:pull can read recent rows without scanning whole tables.
          *
-         * On large tables building an index takes a while; InnoDB builds it
-         * online, so reads and writes keep working in the meantime.
+         * On large tables building an index takes a while; check how your
+         * database builds indexes on busy tables before deploying.
          */
         return new class extends Migration
         {

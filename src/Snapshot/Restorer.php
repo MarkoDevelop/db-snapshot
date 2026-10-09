@@ -7,41 +7,31 @@ use Illuminate\Contracts\Process\ProcessResult;
 use Illuminate\Process\PendingProcess;
 use Illuminate\Support\Facades\Process;
 use InvalidArgumentException;
+use Overthink\DbSnapshot\Contracts\Driver;
+use Overthink\DbSnapshot\DriverManager;
 use RuntimeException;
 
 /**
- * Recreates a local MySQL database from a snapshot, importing tables in parallel.
+ * Recreates a local database from a snapshot, importing tables in parallel,
+ * with the driver the snapshot was pulled with.
  */
 final class Restorer
 {
-    /**
-     * Dumps from a GTID-enabled server start with SET @@GLOBAL.GTID_PURGED.
-     * Only the first per-table import could apply it, so it's dropped. The
-     * statement can span several lines and ends with a semicolon.
-     */
-    private const STRIP_GTID_PURGED = "awk '/^SET @@GLOBAL\\.GTID_PURGED/ { skip = 1 } !skip { print } skip && /;[[:space:]]*$/ { skip = 0 }'";
-
-    public function __construct(private readonly ParallelRunner $runner) {}
+    public function __construct(
+        private readonly ParallelRunner $runner,
+        private readonly DriverManager $drivers,
+    ) {}
 
     /**
-     * @param  array{host?: string, port?: int|string, username?: string, password?: ?string, database: string, charset?: string, collation?: string}  $connection
+     * @param  array<string, mixed>  $connection  a Laravel database connection config
      * @param  (Closure(string, ProcessResult, float): void)|null  $onFinished
      * @return list<string> warnings about views or routines that could not be created
      */
     public function restore(Snapshot $snapshot, array $connection, int $parallel, ?Closure $onFinished = null): array
     {
-        $database = $connection['database'];
+        $driver = $this->driverFor($snapshot, $connection);
 
-        if (! preg_match('/^[A-Za-z0-9_$-]+$/', $database)) {
-            throw new InvalidArgumentException("Invalid database name [{$database}].");
-        }
-
-        $charset = $connection['charset'] ?? 'utf8mb4';
-        $collation = $connection['collation'] ?? 'utf8mb4_unicode_ci';
-
-        $this->ensureSucceeded('recreate database', $this->process($connection)->run($this->mysql($connection, [
-            '-e', "DROP DATABASE IF EXISTS `{$database}`; CREATE DATABASE `{$database}` CHARACTER SET {$charset} COLLATE {$collation}",
-        ])));
+        $this->ensureSucceeded('recreate database', $this->process($driver, $connection)->run($driver->recreateDatabaseCommand($connection)));
 
         $this->importTables($snapshot, $connection, $parallel, $onFinished);
 
@@ -54,10 +44,10 @@ final class Restorer
                 continue;
             }
 
-            $result = $this->process($connection)->run($this->import($connection, $file, force: true));
+            $result = $this->process($driver, $connection)->run($driver->importCommand($connection, $file, continueOnError: true));
 
             if ($result->failed()) {
-                $errors = preg_grep('/^ERROR /', preg_split('/\R/', $result->errorOutput()) ?: []) ?: [trim($result->errorOutput())];
+                $errors = preg_grep('/ERROR/', preg_split('/\R/', $result->errorOutput()) ?: []) ?: [trim($result->errorOutput())];
                 $warnings[] = "Some {$kind} could not be created:\n  ".implode("\n  ", $errors);
             }
         }
@@ -69,19 +59,16 @@ final class Restorer
      * Replace only the snapshot's tables in an existing database; every
      * other table is left as it is.
      *
-     * @param  array{host?: string, port?: int|string, username?: string, password?: ?string, database: string}  $connection
+     * @param  array<string, mixed>  $connection
      * @param  (Closure(string, ProcessResult, float): void)|null  $onFinished
      */
     public function importTables(Snapshot $snapshot, array $connection, int $parallel, ?Closure $onFinished = null): void
     {
-        if (! preg_match('/^[A-Za-z0-9_$-]+$/', $connection['database'])) {
-            throw new InvalidArgumentException("Invalid database name [{$connection['database']}].");
-        }
-
+        $driver = $this->driverFor($snapshot, $connection);
         $jobs = [];
 
         foreach ($snapshot->tableFiles() as $table => $file) {
-            $jobs[$table] = ['command' => $this->import($connection, $file), 'process' => $this->process($connection)];
+            $jobs[$table] = ['command' => $driver->importCommand($connection, $file), 'process' => $this->process($driver, $connection)];
         }
 
         $results = $this->runner->run($jobs, $parallel, $onFinished);
@@ -98,42 +85,31 @@ final class Restorer
     }
 
     /**
-     * @param  array{host?: string, port?: int|string, username?: string, password?: ?string, database: string}  $connection
-     * @return list<string>
+     * @param  array<string, mixed>  $connection
      */
-    private function import(array $connection, string $file, bool $force = false): array
+    private function driverFor(Snapshot $snapshot, array $connection): Driver
     {
-        $pipeline = 'gzip -dc '.escapeshellarg($file).' | '.self::STRIP_GTID_PURGED.' | '.implode(' ', array_map(escapeshellarg(...), $this->mysql($connection, [
-            '--init-command=SET SESSION sql_log_bin = 0, foreign_key_checks = 0, unique_checks = 0',
-            ...($force ? ['--force'] : []),
-            $connection['database'],
-        ])));
+        $driver = $this->drivers->driver($snapshot->driver());
+        $connectionDriver = $connection['driver'] ?? null;
 
-        return ['bash', '-o', 'pipefail', '-c', $pipeline];
+        if ($connectionDriver !== null && ! in_array($connectionDriver, $driver->localConnectionDrivers(), true)) {
+            throw new InvalidArgumentException(sprintf(
+                'Snapshot %s was pulled with the %s driver and cannot be restored into a %s connection.',
+                $snapshot->name(),
+                $driver->name(),
+                $connectionDriver,
+            ));
+        }
+
+        return $driver;
     }
 
     /**
-     * @param  array{host?: string, port?: int|string, username?: string}  $connection
-     * @param  list<string>  $arguments
-     * @return list<string>
+     * @param  array<string, mixed>  $connection
      */
-    private function mysql(array $connection, array $arguments): array
+    private function process(Driver $driver, array $connection): PendingProcess
     {
-        return [
-            'mysql',
-            '--host='.($connection['host'] ?? '127.0.0.1'),
-            '--port='.($connection['port'] ?? 3306),
-            '--user='.($connection['username'] ?? 'root'),
-            ...$arguments,
-        ];
-    }
-
-    /**
-     * @param  array{password?: ?string}  $connection
-     */
-    private function process(array $connection): PendingProcess
-    {
-        return Process::forever()->env(['MYSQL_PWD' => (string) ($connection['password'] ?? '')]);
+        return Process::forever()->env($driver->localEnvironment($connection));
     }
 
     private function ensureSucceeded(string $step, ProcessResult $result): void

@@ -9,9 +9,9 @@ use Illuminate\Process\PendingProcess;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Process;
 use Overthink\DbSnapshot\Analysis\Analyzer;
+use Overthink\DbSnapshot\Contracts\Driver;
 use Overthink\DbSnapshot\Profile\Profile;
 use Overthink\DbSnapshot\Profile\TableMode;
-use Overthink\DbSnapshot\Remote\RemoteMysql;
 use RuntimeException;
 
 /**
@@ -20,7 +20,7 @@ use RuntimeException;
 final class Puller
 {
     public function __construct(
-        private readonly RemoteMysql $mysql,
+        private readonly Driver $driver,
         private readonly Analyzer $analyzer,
         private readonly ParallelRunner $runner,
         private readonly string $basePath,
@@ -57,28 +57,26 @@ final class Puller
                 continue;
             }
 
-            $where = $rule->whereClause($now);
-            $options = match (true) {
-                $rule->mode === TableMode::Schema => ['--no-data'],
-                $where !== null => ['--where='.$where],
-                default => [],
+            $where = match ($rule->mode) {
+                TableMode::Recent => $this->driver->recentCondition((string) $rule->column, $rule->sinceDate($now)),
+                TableMode::Where => $rule->where,
+                default => null,
             };
 
             $file = $directory.'/'.Snapshot::TABLES_DIRECTORY."/{$table->name}.sql.gz";
-            $jobs[$table->name] = $this->job([$table->name], $options, $file);
+            $jobs[$table->name] = $this->job($this->driver->dumpTableCommand($table->name, $rule->mode === TableMode::Schema, $where, $file));
             $manifestTables[$table->name] = ['mode' => $rule->mode->value, 'where' => $where, 'file' => $file];
         }
 
-        if ($views !== [] && ! $partial) {
-            $jobs['_views'] = $this->job($views, ['--no-data', '--skip-triggers'], $directory.'/'.Snapshot::VIEWS_FILE);
-        }
-
         if (! $partial) {
-            $jobs['_routines'] = $this->job(
-                [],
-                ['--routines', '--no-create-info', '--no-data', '--no-create-db', '--skip-triggers'],
-                $directory.'/'.Snapshot::ROUTINES_FILE,
-            );
+            $extras = [
+                '_views' => $views !== [] ? $this->driver->dumpViewsCommand($views, $directory.'/'.Snapshot::VIEWS_FILE) : null,
+                '_routines' => $this->driver->dumpRoutinesCommand($directory.'/'.Snapshot::ROUTINES_FILE),
+            ];
+
+            foreach (array_filter($extras) as $key => $command) {
+                $jobs[$key] = $this->job($command);
+            }
         }
 
         $results = $this->runner->run(
@@ -102,7 +100,8 @@ final class Puller
 
         $manifest = [
             'profile' => $profile->name,
-            'database' => $this->mysql->database,
+            'driver' => $this->driver->name(),
+            'database' => $this->driver->database(),
             'created_at' => $now->toIso8601String(),
             'partial' => $partial,
             'tables' => array_map(fn (array $table): array => [
@@ -121,15 +120,13 @@ final class Puller
     }
 
     /**
-     * @param  list<string>  $tables
-     * @param  list<string>  $options
      * @return array{command: string, process: PendingProcess}
      */
-    private function job(array $tables, array $options, string $file): array
+    private function job(string $command): array
     {
         return [
-            'command' => $this->mysql->dumpCommand($tables, $options, $file),
-            'process' => Process::input($this->mysql->stdin())->forever(),
+            'command' => $command,
+            'process' => Process::input($this->driver->remoteInput())->forever(),
         ];
     }
 }
