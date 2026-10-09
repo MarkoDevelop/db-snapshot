@@ -78,13 +78,15 @@ class StartCommand extends Command
             return self::SUCCESS;
         }
 
+        // Ask about the restore before pulling, so the rest runs unattended.
+        $database = $this->localConnection()['database'];
+        $restore = confirm("Restore it into {$database} afterwards? This drops and recreates the database.", default: false);
+
         if ($this->call('snapshot:pull', ['--profile' => $profile]) !== self::SUCCESS) {
             return self::FAILURE;
         }
 
-        $connection = $this->localConnection();
-
-        if (! confirm("Restore it into {$connection['database']} now? This drops and recreates the database.", default: false)) {
+        if (! $restore) {
             outro("Restore later with: php artisan snapshot:restore latest --profile={$profile}");
 
             return self::SUCCESS;
