@@ -8,22 +8,23 @@ use Overthink\DbSnapshot\Snapshot\Snapshot;
 
 it('recreates the database, imports tables largest first, then routines and views', function () {
     Sleep::fake();
-    Process::preventStrayProcesses();
-    Process::fake();
+    $commands = [];
+    Process::fake(function ($process) use (&$commands) {
+        $commands[] = commandLine($process);
+
+        return Process::result();
+    });
     $snapshot = makeSnapshot($this->workspace.'/snap', ['orders' => 10, 'event_logs' => 50, 'users' => 1]);
 
     app(Restorer::class)->restore($snapshot, localConnection(), 1);
 
-    $runs = fn (string $needle) => fn ($process) => str_contains(is_array($process->command) ? end($process->command) : $process->command, $needle);
-
-    Process::assertRanInOrder([
-        $runs('DROP DATABASE IF EXISTS `dev_wt`; CREATE DATABASE `dev_wt` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci'),
-        $runs('tables/event_logs.sql.gz'),
-        $runs('tables/orders.sql.gz'),
-        $runs('tables/users.sql.gz'),
-        $runs(Snapshot::ROUTINES_FILE),
-        $runs(Snapshot::VIEWS_FILE),
-    ]);
+    expect($commands)->toHaveCount(6)
+        ->and($commands[0])->toContain('DROP DATABASE IF EXISTS `dev_wt`; CREATE DATABASE `dev_wt` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci')
+        ->and($commands[1])->toContain('tables/event_logs.sql.gz')
+        ->and($commands[2])->toContain('tables/orders.sql.gz')
+        ->and($commands[3])->toContain('tables/users.sql.gz')
+        ->and($commands[4])->toContain(Snapshot::ROUTINES_FILE)
+        ->and($commands[5])->toContain(Snapshot::VIEWS_FILE);
 });
 
 it('imports with pipefail so a corrupt file fails the table', function () {
@@ -106,6 +107,6 @@ it('reports views it cannot create as warnings and keeps the restored tables', f
     $warnings = app(Restorer::class)->restore($snapshot, localConnection(), 1);
 
     expect($warnings)->toBe(["Some views could not be created:\n  ERROR 1049 (42000) at line 60: Unknown database 'prod_crm'"]);
-    Process::assertRan(fn ($process) => str_contains(end($process->command), '_views.sql.gz') && str_contains(end($process->command), "'--force'"));
-    Process::assertRan(fn ($process) => str_contains(end($process->command), 'tables/orders.sql.gz') && ! str_contains(end($process->command), '--force'));
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), '_views.sql.gz') && str_contains(commandLine($process), "'--force'"));
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'tables/orders.sql.gz') && ! str_contains(commandLine($process), '--force'));
 });

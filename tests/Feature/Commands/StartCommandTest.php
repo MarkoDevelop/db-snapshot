@@ -44,7 +44,7 @@ it('asks for missing settings, saves them to .env and checks the connection', fu
         ->toContain("SNAPSHOT_REMOTE_DB_DATABASE=production\n")
         ->toContain("SNAPSHOT_REMOTE_DB_PASSWORD='pa ss'\n");
 
-    Process::assertRan(fn ($process) => str_contains($process->command, "'root@203.0.113.10'") && $process->input === "pa ss\n");
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), "'root@203.0.113.10'") && $process->input === "pa ss\n");
 });
 
 it('pulls with an existing profile and stops before restoring when declined', function () {

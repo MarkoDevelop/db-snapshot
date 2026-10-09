@@ -47,9 +47,9 @@ it('reads ranges only for indexed columns of tables above the threshold', functi
 
     app(Analyzer::class)->analyze(rangeThresholdMb: 100);
 
-    Process::assertRanTimes(fn ($process) => str_contains($process->command, 'MIN(`created_at`), MAX(`created_at`) FROM `production`.`event_logs`')
-        && ! str_contains($process->command, 'processed_at')
-        && ! str_contains($process->command, '`users`'), 1);
+    Process::assertRanTimes(fn ($process) => str_contains(commandLine($process), 'MIN(`created_at`), MAX(`created_at`) FROM `production`.`event_logs`')
+        && ! str_contains(commandLine($process), 'processed_at')
+        && ! str_contains(commandLine($process), '`users`'), 1);
 });
 
 it('sends the password on stdin instead of the command line', function () {
@@ -57,7 +57,7 @@ it('sends the password on stdin instead of the command line', function () {
 
     app(Analyzer::class)->tables();
 
-    Process::assertRan(fn ($process) => $process->input === "s3cret\n" && ! str_contains($process->command, 's3cret'));
+    Process::assertRan(fn ($process) => $process->input === "s3cret\n" && ! str_contains(commandLine($process), 's3cret'));
 });
 
 it('survives a save and load of the analysis file', function () {

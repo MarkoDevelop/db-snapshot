@@ -20,7 +20,7 @@ it('pulls the chosen profile and then restores it', function () {
         ->assertSuccessful();
 
     expect(app(SnapshotRepository::class)->find()->profile())->toBe('nightly');
-    Process::assertRan(fn ($process) => str_contains(is_array($process->command) ? implode(' ', $process->command) : $process->command, 'DROP DATABASE IF EXISTS `dev_app`'));
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'DROP DATABASE IF EXISTS `dev_app`'));
 });
 
 it('hands tables given as arguments to refresh-table', function () {
@@ -28,8 +28,8 @@ it('hands tables given as arguments to refresh-table', function () {
 
     $this->artisan('snapshot:refresh', ['tables' => ['orders'], '--force' => true])->assertSuccessful();
 
-    Process::assertRan(fn ($process) => is_string($process->command) && str_contains($process->command, 'tables/orders.sql.gz'));
-    Process::assertNotRan(fn ($process) => str_contains(is_array($process->command) ? implode(' ', $process->command) : $process->command, 'DROP DATABASE'));
+    Process::assertRan(fn ($process) => is_string($process->command) && str_contains(commandLine($process), 'tables/orders.sql.gz'));
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'DROP DATABASE'));
 });
 
 it('points to snapshot:configure when there are no profiles', function () {

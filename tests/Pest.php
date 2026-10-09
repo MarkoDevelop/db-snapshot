@@ -1,5 +1,6 @@
 <?php
 
+use Illuminate\Process\PendingProcess;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Sleep;
@@ -12,6 +13,14 @@ use Overthink\DbSnapshot\Snapshot\Snapshot;
 use Overthink\DbSnapshot\Tests\TestCase;
 
 uses(TestCase::class)->in('Unit', 'Feature');
+
+/**
+ * A faked process's command as one string (restore commands are argument lists).
+ */
+function commandLine(PendingProcess $process): string
+{
+    return is_array($process->command) ? implode(' ', $process->command) : $process->command;
+}
 
 function makeSnapshot(string $path, array $tableSizes, bool $withRoutines = true): Snapshot
 {

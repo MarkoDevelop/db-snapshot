@@ -46,12 +46,12 @@ it('dumps each table according to its rule', function () {
         'orders' => ['mode' => 'full', 'where' => null, 'bytes' => 0],
     ]);
 
-    $dumpOf = fn (string $table) => fn ($process) => str_contains($process->command, "/tables/{$table}.sql.gz");
+    $dumpOf = fn (string $table) => fn ($process) => str_contains(commandLine($process), "/tables/{$table}.sql.gz");
 
-    Process::assertRan(fn ($process) => $dumpOf('event_logs')($process) && str_contains($process->command, '--where=`created_at` >= '));
-    Process::assertRan(fn ($process) => $dumpOf('activities')($process) && str_contains($process->command, '--no-data'));
-    Process::assertRan(fn ($process) => $dumpOf('orders')($process) && ! str_contains($process->command, '--where') && ! str_contains($process->command, '--no-data'));
-    Process::assertNotRan(fn ($process) => str_contains($process->command, 'jobs'));
+    Process::assertRan(fn ($process) => $dumpOf('event_logs')($process) && str_contains(commandLine($process), '--where=`created_at` >= '));
+    Process::assertRan(fn ($process) => $dumpOf('activities')($process) && str_contains(commandLine($process), '--no-data'));
+    Process::assertRan(fn ($process) => $dumpOf('orders')($process) && ! str_contains(commandLine($process), '--where') && ! str_contains(commandLine($process), '--no-data'));
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'jobs'));
 });
 
 it('dumps views and routines separately so they restore after the tables', function () {
@@ -59,8 +59,8 @@ it('dumps views and routines separately so they restore after the tables', funct
 
     $snapshot = app(Puller::class)->pull(defaultProfile(), 4);
 
-    Process::assertRan(fn ($process) => str_ends_with($process->command, '_views.sql.gz\'') && str_contains($process->command, 'order_totals'));
-    Process::assertRan(fn ($process) => str_contains($process->command, '--routines') && str_ends_with($process->command, '_routines.sql.gz\''));
+    Process::assertRan(fn ($process) => str_ends_with(commandLine($process), '_views.sql.gz\'') && str_contains(commandLine($process), 'order_totals'));
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), '--routines') && str_ends_with(commandLine($process), '_routines.sql.gz\''));
     expect($snapshot->manifest['tables'])->not->toHaveKey('order_totals');
 });
 

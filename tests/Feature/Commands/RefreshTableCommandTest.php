@@ -9,12 +9,12 @@ it('pulls only the given tables with their profile rules and replaces only them'
     $this->artisan('snapshot:refresh-table', ['tables' => ['event_logs', 'orders'], '--force' => true])
         ->assertSuccessful();
 
-    Process::assertRan(fn ($process) => str_contains($process->command, 'tables/event_logs.sql.gz') && str_contains($process->command, '--where=`created_at` >= '));
-    Process::assertRan(fn ($process) => str_contains($process->command, 'tables/orders.sql.gz') && ! str_contains($process->command, '--where'));
-    Process::assertNotRan(fn ($process) => str_contains(is_array($process->command) ? implode(' ', $process->command) : $process->command, 'users'));
-    Process::assertNotRan(fn ($process) => str_contains(is_array($process->command) ? implode(' ', $process->command) : $process->command, 'DROP DATABASE'));
-    Process::assertNotRan(fn ($process) => is_string($process->command) && (str_contains($process->command, '_views') || str_contains($process->command, '--routines')));
-    Process::assertRan(fn ($process) => is_array($process->command) && str_contains(end($process->command), 'tables/event_logs.sql.gz') && str_contains(end($process->command), "'dev_app'"));
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'tables/event_logs.sql.gz') && str_contains(commandLine($process), '--where=`created_at` >= '));
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'tables/orders.sql.gz') && ! str_contains(commandLine($process), '--where'));
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'users'));
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'DROP DATABASE'));
+    Process::assertNotRan(fn ($process) => is_string($process->command) && (str_contains(commandLine($process), '_views') || str_contains(commandLine($process), '--routines')));
+    Process::assertRan(fn ($process) => is_array($process->command) && str_contains(commandLine($process), 'tables/event_logs.sql.gz') && str_contains(commandLine($process), "'dev_app'"));
 });
 
 it('removes the pulled files afterwards and keeps them out of snapshot:restore', function () {

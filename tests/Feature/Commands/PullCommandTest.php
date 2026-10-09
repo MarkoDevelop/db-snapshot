@@ -39,7 +39,7 @@ it('keeps the old analysis when the user continues', function () {
         ->expectsChoice(STALE_QUESTION, 'continue', ['analyze' => 'Analyze now', 'continue' => 'Continue with the current analysis'])
         ->assertSuccessful();
 
-    Process::assertNotRan(fn ($process) => str_contains($process->command, 'information_schema.COLUMNS'));
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'information_schema.COLUMNS'));
 });
 
 it('does not ask about a recent analysis', function () {
@@ -48,7 +48,7 @@ it('does not ask about a recent analysis', function () {
 
     $this->artisan('snapshot:pull')->assertSuccessful();
 
-    Process::assertNotRan(fn ($process) => str_contains($process->command, 'information_schema.COLUMNS'));
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'information_schema.COLUMNS'));
 });
 
 it('only warns about a stale analysis when not interactive', function () {
@@ -58,7 +58,7 @@ it('only warns about a stale analysis when not interactive', function () {
         ->expectsOutputToContain('run snapshot:analyze to refresh it')
         ->assertSuccessful();
 
-    Process::assertNotRan(fn ($process) => str_contains($process->command, 'information_schema.COLUMNS'));
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'information_schema.COLUMNS'));
 });
 
 it('re-analyzes without asking when --analyze is given', function () {
@@ -80,5 +80,5 @@ it('offers to create a missing profile and stops when declined', function () {
         ->expectsOutputToContain('Run snapshot:configure default first')
         ->assertFailed();
 
-    Process::assertNotRan(fn ($process) => str_contains($process->command, 'mysqldump'));
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'mysqldump'));
 });
