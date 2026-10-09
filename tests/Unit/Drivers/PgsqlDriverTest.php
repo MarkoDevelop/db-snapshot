@@ -3,7 +3,10 @@
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Process;
+use Overthink\DbSnapshot\Analysis\ColumnInfo;
 use Overthink\DbSnapshot\Drivers\PgsqlDriver;
+use Overthink\DbSnapshot\Profile\AnonymizeStrategy;
+use Overthink\DbSnapshot\Profile\ColumnRule;
 
 function pgsqlDriver(string $schema = 'public'): PgsqlDriver
 {
@@ -89,4 +92,30 @@ it('drops statements older psql rejects and creates foreign keys NOT VALID', fun
 it('treats deadlocks between parallel imports as conflicts to retry', function () {
     expect(pgsqlDriver()->isLockConflict('psql:<stdin>:3: ERROR:  deadlock detected'))->toBeTrue()
         ->and(pgsqlDriver()->isLockConflict('psql:<stdin>:3: ERROR:  relation "users" does not exist'))->toBeFalse();
+});
+
+it('builds replacement expressions in PostgreSQL syntax', function () {
+    $email = new ColumnInfo('email', 'citext', ColumnInfo::TEXT);
+
+    expect(pgsqlDriver()->anonymizedExpression($email, new ColumnRule(AnonymizeStrategy::Email), "pe'pper", 'id'))
+        ->toBe("CASE WHEN \"email\" IS NULL THEN NULL ELSE 'user_' || left(encode(sha256(convert_to('pe''pper' || \"email\"::text, 'UTF8')), 'hex'), 12) || '@example.test' END");
+});
+
+it('copies anonymized tables with an explicit column list', function () {
+    $columns = [
+        new ColumnInfo('id', 'bigint', primaryKey: true),
+        new ColumnInfo('email', 'citext', ColumnInfo::TEXT),
+        new ColumnInfo('search', 'tsvector', generated: true),
+    ];
+    $driver = new PgsqlDriver(['host' => 'db.example.test'], ['database' => 'production']);
+    $command = $driver->dumpAnonymizedTableCommand('users', null, $this->workspace.'/users.sql.gz', $columns, ['email' => "'x'"]);
+
+    $dump = runDumpWithStubs($command, [
+        'pg_dump' => 'echo "-- pg_dump"',
+        'psql' => 'echo "-- psql ${@: -1}"',
+    ], $this->workspace);
+
+    expect($dump)->toContain('COPY "public"."users" ("id", "email") FROM stdin;')
+        ->toContain('-- psql COPY (SELECT "id", (\'x\')::text AS "email" FROM "public"."users") TO STDOUT')
+        ->not->toContain('"search"');
 });

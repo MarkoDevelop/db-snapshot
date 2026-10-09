@@ -50,7 +50,48 @@ jobs:
         run: composer update --prefer-stable --prefer-dist --no-interaction
 
       - name: Execute integration tests
-        run: vendor/bin/pest --ci tests/Integration
+        run: vendor/bin/pest --ci tests/Integration/PgsqlDriverTest.php
         env:
           DB_SNAPSHOT_PGSQL_HOST: 127.0.0.1
           DB_SNAPSHOT_PGSQL_PASSWORD: secret
+
+  mysql:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mysql: ['8.4', '8.0']
+
+    name: MySQL ${{ matrix.mysql }}
+
+    services:
+      mysql:
+        image: mysql:${{ matrix.mysql }}
+        env:
+          MYSQL_ROOT_PASSWORD: secret
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -psecret"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: 8.4
+          coverage: none
+
+      - name: Install dependencies
+        run: composer update --prefer-stable --prefer-dist --no-interaction
+
+      - name: Execute integration tests
+        run: vendor/bin/pest --ci tests/Integration/MysqlDriverTest.php
+        env:
+          DB_SNAPSHOT_MYSQL_HOST: 127.0.0.1
+          DB_SNAPSHOT_MYSQL_PASSWORD: secret

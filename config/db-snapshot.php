@@ -119,6 +119,20 @@ return [
     // snapshot:configure and snapshot:pull offer to re-analyze older analyses.
     'analysis_max_age_days' => 30,
 
+    /*
+    |--------------------------------------------------------------------------
+    | Anonymizing
+    |--------------------------------------------------------------------------
+    |
+    | Columns a profile anonymizes are replaced on the server while dumping.
+    | Hashes are salted: with a fixed salt the same value gets the same fake
+    | in every snapshot; without one, a random salt is used per pull.
+    |
+    */
+    'anonymize' => [
+        'salt' => env('SNAPSHOT_ANONYMIZE_SALT'),
+    ],
+
     // Parallel SSH sessions for pulling and database clients for restoring.
     'parallel' => (int) env('SNAPSHOT_PARALLEL', 4),
 

@@ -50,6 +50,7 @@ class DbSnapshotServiceProvider extends PackageServiceProvider
             $app->make(Analyzer::class),
             $app->make(ParallelRunner::class),
             $app['config']['db-snapshot.path'],
+            $app['config']['db-snapshot.anonymize.salt'],
         ));
 
         $this->app->bind(SnapshotRepository::class, fn (Application $app): SnapshotRepository => new SnapshotRepository($app['config']['db-snapshot.path']));

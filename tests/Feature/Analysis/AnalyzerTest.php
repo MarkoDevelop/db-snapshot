@@ -15,6 +15,11 @@ function fakeRemoteSchema(): void
             "users\tBASE TABLE\t163\t".(1 * $mb)."\t0",
             "order_totals\tVIEW\tNULL\t0\t0",
         ])),
+        '*IS_NULLABLE*' => Process::result(implode("\n", [
+            "event_logs\tid\tbigint\tNULL\tauto_increment\tPRI\tNO",
+            "event_logs\tmessage\tvarchar\t191\t\t\tYES",
+            "event_logs\tcreated_at\ttimestamp\tNULL\t\tMUL\tYES",
+        ])),
         '*information_schema.COLUMNS*' => Process::result(implode("\n", [
             "event_logs\tcreated_at\ttimestamp\t1",
             "event_logs\tprocessed_at\tdatetime\t0",
@@ -67,4 +72,13 @@ it('survives a save and load of the analysis file', function () {
     app(Analyzer::class)->analyze(100)->save($path);
 
     expect(Analysis::load($path)->table('event_logs')->dateColumn('created_at')->max)->toBe('2026-10-01 08:00:00');
+});
+
+it('records every column with what anonymizing needs to know', function () {
+    fakeRemoteSchema();
+
+    $events = app(Analyzer::class)->analyze(100)->table('event_logs');
+
+    expect($events->column('id')->toArray())->toMatchArray(['kind' => 'other', 'primary_key' => true, 'nullable' => false])
+        ->and($events->column('message')->toArray())->toMatchArray(['kind' => 'text', 'max_length' => 191, 'nullable' => true]);
 });

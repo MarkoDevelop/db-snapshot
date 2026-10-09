@@ -3,6 +3,7 @@
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Process;
 use Overthink\DbSnapshot\Analysis\Analysis;
+use Overthink\DbSnapshot\Analysis\ColumnInfo;
 use Overthink\DbSnapshot\Analysis\DateColumn;
 use Overthink\DbSnapshot\Analysis\TableInfo;
 use Overthink\DbSnapshot\Profile\Profile;
@@ -76,4 +77,47 @@ it('skips the large tables question when no table is large', function () {
         ->assertSuccessful();
 
     expect(Profile::load($this->workspace.'/profiles', 'default')->ruleFor('users')->describe())->toBe('schema');
+});
+
+it('suggests personal data columns to anonymize and saves the choice', function () {
+    Process::fake();
+    app()->useDatabasePath($this->workspace.'/database');
+    (new Analysis('production', now()->toImmutable(), [
+        'orders' => new TableInfo('orders', false, 10, 1024, 0, columns: [
+            new ColumnInfo('id', 'int', primaryKey: true, nullable: false),
+            new ColumnInfo('number', 'varchar', ColumnInfo::TEXT, 20, nullable: false),
+            new ColumnInfo('customer_email', 'varchar', ColumnInfo::TEXT, 191),
+            new ColumnInfo('customer_name', 'varchar', ColumnInfo::TEXT, 191),
+        ]),
+    ]))->save($this->workspace.'/analysis.json');
+
+    $this->artisan('snapshot:configure')
+        ->expectsQuestion('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', 'orders')
+        ->expectsChoice('Any smaller tables to filter, empty or skip? (type to search, Enter for none)', ['orders'], ['orders' => 'orders · 1.0 KB · ~10 rows'])
+        ->expectsChoice('orders (1.0 KB, ~10 rows)', 'full', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
+        ->expectsChoice('Anonymize these columns (personal data)', ['orders.customer_email', 'orders.customer_name'], [
+            'orders.customer_email' => 'orders.customer_email → email',
+            'orders.customer_name' => 'orders.customer_name → "Name {hash}"',
+        ])
+        ->expectsQuestion('Any other columns to anonymize? (type to search, Enter for none)', 'number')
+        ->expectsChoice('Any other columns to anonymize? (type to search, Enter for none)', ['orders.number'], ['orders.number' => 'orders.number (varchar)'])
+        ->expectsChoice('Replace orders.number (varchar) with', 'template', [
+            'email' => 'Email — user_<hash>@example.test',
+            'hash' => 'Hash — 12 hex characters',
+            'template' => 'Template — text with {hash} or {id}',
+            'fixed' => 'Fixed — the same value for every row',
+            'empty' => "Empty string ''",
+        ])
+        ->expectsQuestion('Template for orders.number', 'Order {id}')
+        ->expectsQuestion('Save as profile', 'default')
+        ->assertSuccessful();
+
+    expect(Profile::load($this->workspace.'/profiles', 'default')->ruleFor('orders')->toArray())->toBe([
+        'mode' => 'full',
+        'anonymize' => [
+            'customer_email' => 'email',
+            'customer_name' => ['template' => 'Name {hash}'],
+            'number' => ['template' => 'Order {id}'],
+        ],
+    ]);
 });

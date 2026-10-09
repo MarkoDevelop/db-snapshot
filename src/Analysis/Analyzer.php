@@ -3,6 +3,7 @@
 namespace Overthink\DbSnapshot\Analysis;
 
 use Carbon\CarbonImmutable;
+use Overthink\DbSnapshot\Contracts\AnonymizesColumns;
 use Overthink\DbSnapshot\Contracts\Driver;
 
 /**
@@ -21,6 +22,7 @@ final class Analyzer
         $tables = $this->driver->tables();
         $dateColumns = $this->driver->dateColumns();
         $ranges = $this->driver->dateRanges($this->rangeColumns($tables, $dateColumns, $rangeThresholdMb * 1024 * 1024));
+        $allColumns = $this->driver instanceof AnonymizesColumns ? $this->driver->columns() : [];
 
         $result = [];
 
@@ -36,7 +38,7 @@ final class Analyzer
                 $dateColumns[$name] ?? [],
             );
 
-            $result[$name] = new TableInfo($name, $table->isView, $table->rows, $table->dataBytes, $table->indexBytes, $columns);
+            $result[$name] = new TableInfo($name, $table->isView, $table->rows, $table->dataBytes, $table->indexBytes, $columns, $allColumns[$name] ?? []);
         }
 
         return new Analysis($this->driver->database(), CarbonImmutable::now(), $result);

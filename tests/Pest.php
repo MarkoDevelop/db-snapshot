@@ -88,3 +88,31 @@ function modeOptions(array $modes): array
 {
     return array_combine(array_map(fn (TableMode $mode) => $mode->value, $modes), array_map(fn (TableMode $mode) => $mode->label(), $modes));
 }
+
+/**
+ * Runs a dump command with "ssh" executing the remote script locally and the
+ * given database tools replaced by stubs, and returns the dump's content.
+ *
+ * @param  array<string, string>  $stubs  binary => bash body
+ */
+function runDumpWithStubs(string $command, array $stubs, string $workspace): string
+{
+    $bin = $workspace.'/stub-bin';
+    File::ensureDirectoryExists($bin);
+    File::put($bin.'/ssh', "#!/bin/bash\nexec sh -c \"\${@: -1}\"\n");
+    chmod($bin.'/ssh', 0755);
+
+    foreach ($stubs as $binary => $body) {
+        File::put("{$bin}/{$binary}", "#!/bin/bash\n{$body}\n");
+        chmod("{$bin}/{$binary}", 0755);
+    }
+
+    preg_match("/> '([^']+)'$/", $command, $target);
+    exec('PATH='.escapeshellarg($bin.':'.getenv('PATH')).' '.$command.' 2>&1', $output, $exitCode);
+
+    if ($exitCode !== 0) {
+        throw new RuntimeException('Dump failed: '.implode("\n", $output));
+    }
+
+    return (string) gzdecode(File::get($target[1]));
+}

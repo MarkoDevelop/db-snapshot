@@ -3,10 +3,12 @@
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Sleep;
+use Overthink\DbSnapshot\Facades\DbSnapshot;
 use Overthink\DbSnapshot\Profile\Profile;
 use Overthink\DbSnapshot\Profile\TableMode;
 use Overthink\DbSnapshot\Profile\TableRule;
 use Overthink\DbSnapshot\Snapshot\Puller;
+use Overthink\DbSnapshot\Tests\Fixtures\FakeDriver;
 
 function fakeRemoteTables(array $dumpResults = []): void
 {
@@ -116,3 +118,69 @@ it('leaves an existing gitignore in the snapshot directory alone', function () {
 
     expect(File::get($this->workspace.'/snapshots/.gitignore'))->toBe("custom\n");
 });
+
+function fakeRemoteWithColumns(): void
+{
+    fakeRemoteTables([
+        '*IS_NULLABLE*' => Process::result(implode("\n", [
+            "orders\tid\tint\tNULL\tauto_increment\tPRI\tNO",
+            "orders\tnumber\tvarchar\t20\t\t\tNO",
+            "orders\tcustomer_email\tvarchar\t191\t\t\tYES",
+            "orders\tcustomer_phone\tvarchar\t30\t\t\tNO",
+            "orders\ttotal\tdecimal\tNULL\t\t\tNO",
+            "event_logs\tmessage\ttext\t65535\t\t\tYES",
+        ])),
+    ]);
+}
+
+function anonymizingProfile(array $orders): Profile
+{
+    return new Profile('default', TableMode::Full, [
+        'orders' => TableRule::fromArray(['mode' => 'full', 'anonymize' => $orders]),
+        'activities' => new TableRule(TableMode::Skip),
+        'event_logs' => new TableRule(TableMode::Skip),
+        'jobs' => new TableRule(TableMode::Skip),
+    ]);
+}
+
+it('dumps anonymized tables with the replacements and records them in the manifest', function () {
+    fakeRemoteWithColumns();
+    config()->set('db-snapshot.anonymize.salt', 'pepper');
+
+    $snapshot = app(Puller::class)->pull(anonymizingProfile(['customer_email' => 'email', 'customer_phone' => 'empty']), 1);
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'tables/orders.sql.gz')
+        && str_contains(commandLine($process), 'SHA2(')
+        && str_contains(commandLine($process), 'pepper')
+        && str_contains(commandLine($process), 'INSERT INTO'));
+    expect($snapshot->manifest['tables']['orders']['anonymized'])->toBe(['customer_email', 'customer_phone'])
+        ->and($snapshot->manifest['tables'])->not->toHaveKey('activities');
+});
+
+it('lists every rule that cannot work and pulls nothing', function () {
+    fakeRemoteWithColumns();
+
+    expect(fn () => app(Puller::class)->pull(anonymizingProfile([
+        'customer_mail' => 'email',
+        'customer_phone' => 'null',
+        'total' => 'hash',
+        'number' => ['template' => 'Order {id}'],
+    ]), 1))->toThrow(RuntimeException::class, implode("\n  ", [
+        "Profile [default] can't anonymize:",
+        'orders.customer_mail does not exist',
+        'orders.customer_phone is NOT NULL; "null" would fail (use "empty" or "fixed")',
+        'orders.total is decimal; "hash" needs a text column (use "null" or "fixed")',
+    ]));
+
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'tables/orders.sql.gz'));
+});
+
+it('refuses to anonymize with a driver that cannot', function () {
+    Process::fake();
+    DbSnapshot::extend('fake', fn () => new FakeDriver);
+    config()->set('db-snapshot.driver', 'fake');
+
+    app(Puller::class)->pull(new Profile('default', TableMode::Full, [
+        'orders' => TableRule::fromArray(['mode' => 'full', 'anonymize' => ['email' => 'email']]),
+    ]), 1);
+})->throws(RuntimeException::class, "The fake driver can't anonymize columns");
