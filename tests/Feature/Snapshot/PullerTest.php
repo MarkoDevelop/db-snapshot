@@ -98,3 +98,21 @@ it('never runs more dumps at once than allowed', function () {
 
     expect($maxRunning)->toBe(2);
 });
+
+it('keeps the snapshot directory out of git', function () {
+    fakeRemoteTables();
+
+    app(Puller::class)->pull(defaultProfile(), 1);
+
+    expect(File::get($this->workspace.'/snapshots/.gitignore'))->toBe("*\n!.gitignore\n");
+});
+
+it('leaves an existing gitignore in the snapshot directory alone', function () {
+    fakeRemoteTables();
+    File::ensureDirectoryExists($this->workspace.'/snapshots');
+    File::put($this->workspace.'/snapshots/.gitignore', "custom\n");
+
+    app(Puller::class)->pull(defaultProfile(), 1);
+
+    expect(File::get($this->workspace.'/snapshots/.gitignore'))->toBe("custom\n");
+});

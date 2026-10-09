@@ -117,6 +117,17 @@ Filtering by date leaves rows in other tables that point at rows not copied. Res
 
 `snapshot:configure` and `snapshot:pull` check how old the analysis is. If it's older than `analysis_max_age_days` (30 by default), they ask whether to **Analyze now** or continue with the current one. Without interaction they only warn. Pass `--analyze` to either command to refresh it without being asked.
 
+## What to commit
+
+| Path | Commit? |
+| --- | --- |
+| `database/snapshot-profiles/*.json` | Yes: the team shares which tables are copied and how much of them |
+| `database/snapshot-analysis.json` | Yes: teammates can run `snapshot:configure` without touching the server |
+| `database/migrations/…_add_snapshot_date_indexes.php` | Yes, after review, like any migration |
+| the snapshot directory (`SNAPSHOT_PATH`, default `storage/db-snapshots`) | **Never**: it holds production data |
+
+`snapshot:pull` writes a `.gitignore` (`*`, `!.gitignore`) into the snapshot directory, so the dumps stay out of commits even at the default location inside the project. An existing `.gitignore` there is left alone.
+
 ## Pulling and restoring
 
 ```bash

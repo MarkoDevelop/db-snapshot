@@ -39,6 +39,7 @@ final class Puller
         $directory = rtrim($this->basePath, '/').'/'.$name.'.partial';
 
         File::ensureDirectoryExists($directory.'/'.Snapshot::TABLES_DIRECTORY);
+        $this->keepOutOfGit();
 
         $jobs = [];
         $manifestTables = [];
@@ -120,6 +121,19 @@ final class Puller
         File::moveDirectory($directory, $finalDirectory);
 
         return Snapshot::load($finalDirectory);
+    }
+
+    /**
+     * Snapshots hold production data, so the directory never ends up in a
+     * commit, even when it lives inside the project (the default).
+     */
+    private function keepOutOfGit(): void
+    {
+        $gitignore = rtrim($this->basePath, '/').'/.gitignore';
+
+        if (! File::exists($gitignore)) {
+            File::put($gitignore, "*\n!.gitignore\n");
+        }
     }
 
     /**
