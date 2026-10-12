@@ -111,13 +111,7 @@ class RestoreCommand extends Command
         $options = [];
 
         foreach ($available as $snapshot) {
-            $options[$snapshot->name()] = sprintf(
-                '%s · %s · %s · %s',
-                $snapshot->createdAt()->diffForHumans(),
-                $snapshot->profile(),
-                $this->formatBytes($snapshot->bytes()),
-                $snapshot->name(),
-            );
+            $options[$snapshot->name()] = $this->snapshotLabel($snapshot);
         }
 
         return $snapshots->find((string) select(

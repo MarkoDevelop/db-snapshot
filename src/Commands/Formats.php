@@ -4,6 +4,7 @@ namespace Overthink\DbSnapshot\Commands;
 
 use Closure;
 use Illuminate\Contracts\Process\ProcessResult;
+use Overthink\DbSnapshot\Snapshot\Snapshot;
 
 trait Formats
 {
@@ -25,6 +26,20 @@ trait Formats
     protected function parallel(): int
     {
         return max(1, (int) ($this->option('parallel') ?: config('db-snapshot.parallel')));
+    }
+
+    /**
+     * "1 day ago · default · 120 MB · 2026-10-08_080000_default"
+     */
+    protected function snapshotLabel(Snapshot $snapshot): string
+    {
+        return sprintf(
+            '%s · %s · %s · %s',
+            $snapshot->createdAt()->diffForHumans(),
+            $snapshot->profile(),
+            $this->formatBytes($snapshot->bytes()),
+            $snapshot->name(),
+        );
     }
 
     protected function formatBytes(int|float $bytes): string

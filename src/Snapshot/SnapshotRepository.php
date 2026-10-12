@@ -13,6 +13,8 @@ final class SnapshotRepository
      * Complete, non-partial snapshots (those with a manifest), newest first.
      *
      * @return list<Snapshot>
+     *
+     * @phpstan-impure
      */
     public function all(): array
     {
