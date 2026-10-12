@@ -25,7 +25,7 @@ php artisan snapshot:pull        # stream per-table gzipped dumps over SSH, in p
 php artisan snapshot:restore     # drop + recreate the local DB from the latest snapshot
 php artisan snapshot:refresh     # later on: refresh a whole profile, or just some tables
 php artisan snapshot:refresh-table orders users   # pull + replace only these tables
-php artisan snapshot:list
+php artisan snapshot:list        # pick a snapshot to restore or delete (a plain table with --no-interaction)
 php artisan snapshot:profiles    # saved profiles with their rules and last pull
 ```
 
