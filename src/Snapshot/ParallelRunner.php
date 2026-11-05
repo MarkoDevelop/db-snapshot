@@ -15,7 +15,7 @@ final class ParallelRunner
 {
     /**
      * @param  array<string, array{command: string|list<string>, process: PendingProcess}>  $jobs
-     * @param  (Closure(string, ProcessResult, float): void)|null  $onFinished
+     * @param  (Closure(string, ProcessResult, float, int, int): void)|null  $onFinished  also gets how many jobs are done, of how many
      * @param  (Closure(list<string>): void)|null  $onTick  receives the keys still running
      * @return array<string, ProcessResult>
      */
@@ -46,7 +46,7 @@ final class ParallelRunner
                 unset($running[$key]);
 
                 if ($onFinished !== null) {
-                    $onFinished($key, $results[$key], microtime(true) - $entry['started']);
+                    $onFinished($key, $results[$key], microtime(true) - $entry['started'], count($results), count($jobs));
                 }
             }
 

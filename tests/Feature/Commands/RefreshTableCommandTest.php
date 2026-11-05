@@ -41,8 +41,8 @@ it('removes the pulled files afterwards and keeps them out of snapshot:restore',
 it('rejects tables that do not exist on the server', function () {
     prepareRefresh($this->workspace);
 
-    $this->artisan('snapshot:refresh-table', ['tables' => ['orderz'], '--force' => true])
-        ->expectsOutputToContain('Unknown tables: orderz')
+    $this->artisan('snapshot:refresh-table', ['tables' => ['orderz', 'invoices'], '--force' => true])
+        ->expectsOutputToContain('Unknown tables: orderz (did you mean orders?), invoices')
         ->assertFailed();
 
     Process::assertNothingRan();
@@ -52,8 +52,7 @@ it('does not touch the database when the confirmation is declined', function () 
     prepareRefresh($this->workspace);
 
     $this->artisan('snapshot:refresh-table', ['tables' => ['orders']])
-        ->expectsConfirmation('Also save these tables as an add-on, to apply on top of later restores?', 'no')
-        ->expectsConfirmation('Replace orders in dev_app?', 'no')
+        ->expectsChoice('Replace orders in dev_app?', 'cancel', replaceOptions())
         ->assertFailed();
 
     Process::assertNothingRan();
@@ -200,9 +199,8 @@ it('saves to a new add-on when you say yes before pulling', function () {
     prepareRefresh($this->workspace);
 
     $this->artisan('snapshot:refresh-table', ['tables' => ['orders']])
-        ->expectsConfirmation('Also save these tables as an add-on, to apply on top of later restores?', 'yes')
+        ->expectsChoice('Replace orders in dev_app?', 'save', replaceOptions())
         ->expectsQuestion('Add-on name', 'all-orders')
-        ->expectsConfirmation('Replace orders in dev_app?', 'yes')
         ->assertSuccessful();
 
     expect(app(SnapshotRepository::class)->findAddon('all-orders')->tables())->toBe(['orders']);
@@ -273,10 +271,10 @@ it('offers followers of searched tables and keeps their profile rules', function
         ->expectsQuestion('Tables to refresh (type to search)', 'orders')
         ->expectsChoice('Tables to refresh (type to search)', ['orders'], ['orders' => 'orders · 1000 B · ~10 rows · now: where id > 5'])
         ->expectsConfirmation('Also refresh event_logs? They follow orders.', 'yes')
+        ->expectsChoice('Change any rule for this run?', ['orders'], ['orders' => 'orders · where id > 5'])
         ->expectsChoice('orders (1000 B, ~10 rows)', 'where', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
         ->expectsQuestion('WHERE clause for orders', 'id > 7')
-        ->expectsConfirmation('Also save these tables as an add-on, to apply on top of later restores?', 'no')
-        ->expectsConfirmation('Replace orders, event_logs in dev_app?', 'yes')
+        ->expectsChoice('Replace orders, event_logs in dev_app?', 'replace', replaceOptions())
         ->assertSuccessful();
 
     Process::assertRan(fn ($process) => str_contains(commandLine($process), 'tables/event_logs.sql.gz') && str_contains(commandLine($process), 'WHERE id > 7)'));
@@ -300,9 +298,9 @@ it('does not offer Follow when the profile already has the other table follow th
         ->expectsQuestion('Tables to refresh (type to search)', 'orders')
         ->expectsChoice('Tables to refresh (type to search)', ['orders'], ['orders' => 'orders · 1000 B · ~10 rows · now: where id > 5'])
         ->expectsConfirmation('Also refresh event_logs? They follow orders.', 'no')
+        ->expectsChoice('Change any rule for this run?', ['orders'], ['orders' => 'orders · where id > 5'])
         ->expectsChoice('orders (1000 B, ~10 rows)', 'full', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
-        ->expectsConfirmation('Also save these tables as an add-on, to apply on top of later restores?', 'no')
-        ->expectsConfirmation('Replace orders in dev_app?', 'yes')
+        ->expectsChoice('Replace orders in dev_app?', 'replace', replaceOptions())
         ->assertSuccessful();
 });
 
@@ -312,10 +310,43 @@ it('lets a picked table follow another one for this run', function () {
     $this->artisan('snapshot:refresh-table')
         ->expectsQuestion('Tables to refresh (type to search)', 'event_logs')
         ->expectsChoice('Tables to refresh (type to search)', ['event_logs'], ['event_logs' => 'event_logs · 1000 B · ~10 rows · now: rows of copied orders by order_id'])
+        ->expectsChoice('Change any rule for this run?', ['event_logs'], ['event_logs' => 'event_logs · rows of copied orders by order_id'])
         ->expectsChoice('event_logs (1000 B, ~10 rows)', 'follow', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Follow, TableMode::Skip]))
-        ->expectsConfirmation('Also save these tables as an add-on, to apply on top of later restores?', 'no')
-        ->expectsConfirmation('Replace event_logs in dev_app?', 'yes')
+        ->expectsChoice('Replace event_logs in dev_app?', 'replace', replaceOptions())
         ->assertSuccessful();
 
     Process::assertRan(fn ($process) => str_contains(commandLine($process), 'tables/event_logs.sql.gz') && str_contains(commandLine($process), 'WHERE id > 5)'));
 });
+
+it('needs --force to replace tables when not interactive', function () {
+    prepareRefresh($this->workspace);
+
+    $this->artisan('snapshot:refresh-table', ['tables' => ['orders'], '--no-interaction' => true])
+        ->expectsOutputToContain('Pass --force to replace orders in dev_app.')
+        ->assertFailed();
+
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'mysqldump'));
+});
+
+it('keeps the profile rules of searched tables when none is picked for changing', function () {
+    prepareFollowingRefresh($this->workspace);
+
+    $this->artisan('snapshot:refresh-table')
+        ->expectsQuestion('Tables to refresh (type to search)', 'orders')
+        ->expectsChoice('Tables to refresh (type to search)', ['orders'], ['orders' => 'orders · 1000 B · ~10 rows · now: where id > 5'])
+        ->expectsConfirmation('Also refresh event_logs? They follow orders.', 'no')
+        ->expectsChoice('Change any rule for this run?', [], ['orders' => 'orders · where id > 5'])
+        ->expectsOutputToContain('orders: where id > 5')
+        ->expectsChoice('Replace orders in dev_app?', 'replace', replaceOptions())
+        ->assertSuccessful();
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'tables/orders.sql.gz') && str_contains(commandLine($process), 'id > 5'));
+});
+
+/**
+ * @return array<string, string>
+ */
+function replaceOptions(): array
+{
+    return ['replace' => 'Yes', 'save' => 'Yes, and save them as an add-on to apply on top of later restores', 'cancel' => 'No'];
+}

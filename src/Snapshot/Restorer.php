@@ -27,7 +27,7 @@ final class Restorer
 
     /**
      * @param  array<string, mixed>  $connection  a Laravel database connection config
-     * @param  (Closure(string, ProcessResult, float): void)|null  $onFinished
+     * @param  (Closure(string, ProcessResult, float, ?int, ?int): void)|null  $onFinished
      * @param  list<Snapshot>  $addons  applied after the tables and before the views, in this order
      * @param  (Closure(Snapshot): void)|null  $onAddon  called before each add-on is applied
      * @return list<string> warnings about views or routines that could not be created
@@ -65,7 +65,7 @@ final class Restorer
      * other table is left as it is.
      *
      * @param  array<string, mixed>  $connection
-     * @param  (Closure(string, ProcessResult, float): void)|null  $onFinished
+     * @param  (Closure(string, ProcessResult, float, ?int, ?int): void)|null  $onFinished
      * @param  list<string>|null  $only  import just these of the snapshot's tables
      * @return list<string> warnings about indexes or constraints that could not be created
      */
@@ -123,9 +123,11 @@ final class Restorer
     /**
      * Tell the reporter which attempts collided and which are retries.
      *
-     * @param  (Closure(string, ProcessResult, float): void)|null  $onFinished
+     * Retries run as a batch of their own, so they carry no done/total count.
+     *
+     * @param  (Closure(string, ProcessResult, float, ?int, ?int): void)|null  $onFinished
      * @param  Closure(ProcessResult): bool  $isConflict
-     * @return (Closure(string, ProcessResult, float): void)|null
+     * @return (Closure(string, ProcessResult, float, int, int): void)|null
      */
     private function labelled(?Closure $onFinished, Closure $isConflict, ?int $attempt): ?Closure
     {
@@ -133,13 +135,15 @@ final class Restorer
             return null;
         }
 
-        return function (string $table, ProcessResult $result, float $seconds) use ($onFinished, $isConflict, $attempt): void {
+        return function (string $table, ProcessResult $result, float $seconds, int $done, int $total) use ($onFinished, $isConflict, $attempt): void {
             $notes = array_filter([
                 $attempt !== null ? "retry {$attempt}" : null,
                 $isConflict($result) && $attempt !== self::CONFLICT_RETRIES ? 'lock conflict, retrying' : null,
             ]);
 
-            $onFinished($notes === [] ? $table : $table.' ('.implode(', ', $notes).')', $result, $seconds);
+            $label = $notes === [] ? $table : $table.' ('.implode(', ', $notes).')';
+
+            $attempt === null ? $onFinished($label, $result, $seconds, $done, $total) : $onFinished($label, $result, $seconds, null, null);
         };
     }
 

@@ -18,6 +18,12 @@ use function Laravel\Prompts\warning;
 trait UsesAnalysis
 {
     /**
+     * Container key holding the analysis already settled in this process
+     * ("none" when there was none), so commands calling each other ask once.
+     */
+    private const SETTLED_ANALYSIS = 'db-snapshot.settled-analysis';
+
+    /**
      * @param  bool  $required  analyze when there is no analysis file yet
      */
     protected function analysis(Analyzer $analyzer, bool $required): ?Analysis
@@ -29,6 +35,14 @@ trait UsesAnalysis
         if ($this->forceAnalyze() || ($analysis === null && $required)) {
             return $this->analyzeNow($analyzer, $path);
         }
+
+        $key = $analysis?->analyzedAt->toIso8601String() ?? 'none';
+
+        if ($this->laravel->bound(self::SETTLED_ANALYSIS) && $this->laravel->make(self::SETTLED_ANALYSIS) === $key) {
+            return $analysis;
+        }
+
+        $this->laravel->instance(self::SETTLED_ANALYSIS, $key);
 
         if ($analysis === null) {
             note('No analysis yet; run snapshot:analyze to see table sizes.');
@@ -44,7 +58,7 @@ trait UsesAnalysis
             return $analysis;
         }
 
-        if (! $this->input->isInteractive()) {
+        if (! $this->mayAskAboutAnalysis()) {
             warning("The analysis is from {$age}; run snapshot:analyze to refresh it.");
 
             return $analysis;
@@ -81,6 +95,14 @@ trait UsesAnalysis
         ));
     }
 
+    /**
+     * Whether an old analysis may be asked about; otherwise it's only warned about.
+     */
+    protected function mayAskAboutAnalysis(): bool
+    {
+        return $this->input->isInteractive();
+    }
+
     protected function forceAnalyze(): bool
     {
         return (bool) $this->option('analyze');
@@ -94,6 +116,7 @@ trait UsesAnalysis
         );
 
         $analysis->save($path);
+        $this->laravel->instance(self::SETTLED_ANALYSIS, $analysis->analyzedAt->toIso8601String());
 
         return $analysis;
     }

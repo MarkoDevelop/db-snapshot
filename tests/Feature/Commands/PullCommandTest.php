@@ -126,3 +126,13 @@ it('warns about followers of a table that copies no rows', function () {
         ->expectsOutputToContain('order_items follows orders, which copies no rows, so order_items stays empty.')
         ->assertSuccessful();
 });
+
+it('counts finished dumps', function () {
+    prepareStalePull($this->workspace);
+    (new Analysis('production', now()->toImmutable(), []))->save($this->workspace.'/analysis.json');
+
+    $this->artisan('snapshot:pull')
+        ->expectsOutputToContain('1/2')
+        ->expectsOutputToContain('2/2')
+        ->assertSuccessful();
+});

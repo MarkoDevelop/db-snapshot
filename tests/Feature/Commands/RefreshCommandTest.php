@@ -46,12 +46,6 @@ it('offers to create the default profile when there are none', function () {
             'profile' => 'The whole database, from a profile (pull + restore)',
             'tables' => 'Just some tables (the rest of the database stays as it is)',
         ])
-        ->expectsChoice('Restore into which database?', 'app', [
-            'app' => "dev_app (the app's database)",
-            'new' => 'production_'.now()->format('Y_m_d').' (a database for this snapshot)',
-            'other' => 'Another name…',
-        ])
-        ->expectsConfirmation('Pull [default] and drop and recreate dev_app with it?', 'yes')
         ->expectsConfirmation("Profile [default] doesn't exist yet. Create it now?", 'no')
         ->expectsOutputToContain('Run snapshot:configure default first')
         ->assertFailed();
@@ -110,4 +104,68 @@ it('applies --addon without asking, and checks it before pulling', function () {
         ->expectsOutputToContain('with orders')
         ->assertSuccessful();
     Process::assertRan(fn ($process) => str_contains(commandLine($process), $addon->path.'/tables/orders.sql.gz'));
+});
+
+it('needs --force to drop the database when not interactive', function () {
+    prepareRefresh($this->workspace);
+
+    $this->artisan('snapshot:refresh', ['--profile' => 'default', '--no-interaction' => true])
+        ->expectsOutputToContain('Pass --force to pull [default] and drop and recreate dev_app with it.')
+        ->assertFailed();
+
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'mysqldump'));
+});
+
+it('settles an old analysis before pulling, so the pull runs unattended', function () {
+    prepareRefresh($this->workspace);
+    $this->travel(2)->months();
+
+    $this->artisan('snapshot:refresh', ['--profile' => 'default'])
+        ->expectsChoice('The analysis of the remote database is from 2 months ago. Refresh it?', 'continue', [
+            'analyze' => 'Analyze now',
+            'continue' => 'Continue with the current analysis',
+        ])
+        ->expectsChoice('Restore into which database?', 'app', [
+            'app' => "dev_app (the app's database)",
+            'new' => 'production_'.now()->format('Y_m_d').' (a database for this snapshot)',
+            'other' => 'Another name…',
+        ])
+        ->expectsConfirmation('Pull [default] and drop and recreate dev_app with it?', 'yes')
+        ->assertSuccessful();
+});
+
+it('rejects --addon when refreshing only some tables', function () {
+    prepareRefresh($this->workspace);
+
+    $this->artisan('snapshot:refresh', ['tables' => ['orders'], '--addon' => ['orders'], '--force' => true])
+        ->expectsOutputToContain('use snapshot:refresh-table --from=<add-on>')
+        ->assertFailed();
+
+    Process::assertNothingRan();
+});
+
+it('asks nothing with --force: an old analysis is only warned about, a missing profile fails', function () {
+    prepareRefresh($this->workspace);
+    $this->travel(2)->months();
+
+    $this->artisan('snapshot:refresh', ['--profile' => 'nightly', '--force' => true])
+        ->expectsOutputToContain('Profile [nightly] doesn\'t exist. Run snapshot:configure nightly first.')
+        ->assertFailed();
+
+    $this->artisan('snapshot:refresh', ['--profile' => 'default', '--force' => true])
+        ->expectsOutputToContain('The analysis is from 2 months ago')
+        ->assertSuccessful();
+});
+
+it('refuses an add-on of another driver before pulling', function () {
+    prepareRefresh($this->workspace);
+    $addon = makeAddon($this->workspace, 'orders', ['orders' => 2]);
+    $manifest = json_decode(File::get($addon->path.'/manifest.json'), true);
+    File::put($addon->path.'/manifest.json', json_encode([...$manifest, 'driver' => 'pgsql']));
+
+    $this->artisan('snapshot:refresh', ['--profile' => 'default', '--addon' => ['orders'], '--force' => true])
+        ->expectsOutputToContain('Add-on orders was pulled with the pgsql driver, and this pull uses mysql.')
+        ->assertFailed();
+
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'mysqldump'));
 });

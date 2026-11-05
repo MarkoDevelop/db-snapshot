@@ -29,7 +29,7 @@ class AnalyzeCommand extends Command
         try {
             $analysis = spin(
                 fn (): Analysis => $analyzer->analyze((int) config('db-snapshot.large_table_mb')),
-                'Reading information_schema over SSH…',
+                'Analyzing the remote database over SSH…',
             );
         } catch (Throwable $exception) {
             error($exception->getMessage());

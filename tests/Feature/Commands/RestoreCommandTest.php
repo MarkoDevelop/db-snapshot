@@ -217,3 +217,13 @@ it('needs an add-on name for a bare --addon when not interactive', function () {
 
     Process::assertNothingRan();
 });
+
+it('needs --force to drop the database when not interactive', function () {
+    prepareSnapshotChoice($this->workspace);
+
+    $this->artisan('snapshot:restore', ['snapshot' => 'latest', '--no-interaction' => true])
+        ->expectsOutputToContain('Not interactive, so nothing was changed. Pass --force to drop and recreate dev_wt on mysql:3306.')
+        ->assertFailed();
+
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'DROP DATABASE'));
+});

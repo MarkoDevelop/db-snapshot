@@ -11,7 +11,7 @@ composer require --dev overthink/db-snapshot
 php artisan snapshot
 ```
 
-`php artisan snapshot` walks you through everything: it asks for the SSH and database settings (and saves them to `.env`), checks the connection, analyzes the remote database, lets you build a profile, then pulls and restores. Run it again any time; it skips the steps that are already done.
+`php artisan snapshot` walks you through everything: it asks for the SSH and database settings, checks the connection (and lets you edit the settings until it works) and saves them to `.env`, analyzes the remote database, lets you build a profile, then pulls and restores (asking the same questions as [`snapshot:refresh`](#refreshing)), or only pulls. Run it again any time; it skips the steps that are already done.
 
 To redo the analysis and the profile, run `php artisan snapshot --fresh`: it re-analyzes the remote database and opens the profile editor even when both already exist. The connection settings are kept.
 
@@ -26,7 +26,7 @@ php artisan snapshot:restore     # drop + recreate the local DB from the latest 
 php artisan snapshot:refresh     # later on: refresh a whole profile, or just some tables
 php artisan snapshot:refresh-table orders users   # pull + replace only these tables
 php artisan snapshot:addon       # extra tables kept apart from the snapshot, to reapply after restores
-php artisan snapshot:list        # pick a snapshot or add-on to restore, load or delete (a plain table with --no-interaction)
+php artisan snapshot:list        # pick a snapshot or add-on to restore, load or delete, or prune old ones (a plain table with --no-interaction)
 php artisan snapshot:profiles    # saved profiles with their rules and last pull
 ```
 
@@ -130,11 +130,11 @@ A profile looks like this:
 | `follow` | rows whose `column` points at a row the `parent` table copies (see [Following other tables](#following-other-tables)) |
 | `skip` | the table is left out |
 
-Tables the profile doesn't list use `default_mode`, so a new table on the server is never silently dropped. `months` is relative, so a profile stays current without editing.
+Tables the profile doesn't list use `default_mode` (`full`, `schema` or `skip`; set it with `snapshot:configure --default-mode=`). With `full`, a new table on the server is never silently dropped. `months` is relative, so a profile stays current without editing.
 
-In `snapshot:configure`, large tables (over `large_table_mb`, 200 MB by default) and tables that already have a rule are listed first, with their size, row count and indexed date columns. Existing rules are preselected. Any other table can be found by typing its name. For `recent` rules, each period option shows an estimated size, and a summary table shows the expected snapshot size before you save.
+In `snapshot:configure`, large tables (over `large_table_mb`, 200 MB by default) and tables that already have a rule are listed first, with their size, row count and indexed date columns. Existing rules are preselected. Any other table can be found by typing its name. Tables that already have a rule keep it unless you check them under *Change any of the current rules?*, so editing one rule doesn't walk you through all of them. For `recent` rules, each period option shows an estimated size, and a summary table shows the expected snapshot size before you save.
 
-At the end you choose the name to save under, so one run can turn `default` into a new `nightly` profile. A different existing profile is only overwritten after you confirm.
+To build a new profile from an existing one, pick **Copy a profile…** (or pass `--from=`) at the start; the original stays as it is.
 
 If a `recent` or `follow` rule filters on a column without an index, the server has to scan the whole table to find the rows. `snapshot:configure` lists those columns and offers to generate a migration (`database/migrations/…_add_snapshot_indexes.php`) that adds the indexes. Review it and deploy it like any other migration. InnoDB builds indexes online, but on very large tables it still takes a while.
 
@@ -247,14 +247,16 @@ php artisan snapshot:restore 2026-10-08_120000_default --database=dev_other
 
 `snapshot:refresh` asks what to refresh:
 
-- **a profile:** pulls a new snapshot with it and restores the whole database (`--profile=nightly` skips the question). Every question comes first: which profile, which database to restore into, the drop confirmation, and whether to point the app at a new database. After that it pulls and restores without stopping. `--force` asks nothing and restores into the app's database;
+- **a profile:** pulls a new snapshot with it and restores the whole database (`--profile=nightly` skips the question). Every question comes first: which profile (and creating it if it doesn't exist), whether to refresh an old analysis, which database to restore into, the drop confirmation, whether to point the app at a new database, and which add-ons to apply. After that it pulls and restores without stopping. `--force` asks nothing (an old analysis is only warned about, and a missing profile is an error) and restores into the app's database, and without interaction `--force` is required;
 - **some tables:** hands over to `snapshot:refresh-table`.
 
-`snapshot:refresh-table [tables...]` pulls only the given tables (or the ones you pick in a search) and replaces just those tables in your local database. Nothing else is dropped. Each table starts from its rule in the profile (`--profile=`), and you can change the rule for this run. The pulled files are deleted afterwards unless you pass `--keep` or save them as an [add-on](#add-ons). Partial pulls are never used by `snapshot:restore` as a snapshot. When add-ons exist and no tables are given, it first asks whether the tables come from the server or from an add-on.
+`snapshot:refresh-table [tables...]` pulls only the given tables (or the ones you pick in a search) and replaces just those tables in your local database. Nothing else is dropped. Each table uses its rule from the profile (`--profile=`). Tables picked in the search can get another rule for this run: check them under *Change any rule for this run?* (the profile itself isn't changed). Tables added because they follow a picked one keep following it. The pulled files are deleted afterwards unless you pass `--keep` or save them as an [add-on](#add-ons). Partial pulls are never used by `snapshot:restore` as a snapshot. When add-ons exist and no tables are given, it first asks whether the tables come from the server or from an add-on.
 
 A snapshot is a directory of `tables/<table>.sql.gz` files plus `_views.sql.gz`, `_routines.sql.gz` and `manifest.json`. It's written as `<name>.partial` and renamed only when every dump succeeds. A failed pull leaves nothing behind.
 
 Without a snapshot name, `snapshot:restore` lists the snapshots (filtered by `--profile=`), newest first and preselected, so Enter restores the latest. Pass a name or `latest`, or run it with `--no-interaction`, to skip the question.
+
+Snapshots hold production data and add up. `snapshot:list` shows how much space they take, and its **Delete old snapshots…** entry keeps only the newest N per profile (add-ons are left alone). Without interaction, `snapshot:restore`, `snapshot:refresh` and `snapshot:refresh-table` need `--force`, since there's nobody to confirm the drop.
 
 ### One database per snapshot
 
@@ -309,7 +311,7 @@ The usual steps:
    php artisan snapshot:restore latest --addon=all-orders
    ```
 
-Pass `--from` or `--addon` without a name to pick from a list (that also asks with `--force`). `--addon` can be given several times. You don't have to start from `snapshot:addon`: `snapshot:refresh-table` asks before pulling whether to save the tables to an add-on (no by default), or takes `--save=all-orders` (`--save` alone asks which add-on). `snapshot:restore` and `snapshot:refresh` ask which add-ons to apply (none by default, and not with `--force`); both take `--addon`. `snapshot:list` shows add-ons after the snapshots.
+Pass `--from` or `--addon` without a name to pick from a list (that also asks with `--force`). `--addon` can be given several times. You don't have to start from `snapshot:addon`: `snapshot:refresh-table`'s last question, *Replace … ?*, also offers to save the tables to an add-on, or takes `--save=all-orders` (`--save` alone asks which add-on). `snapshot:restore` and `snapshot:refresh` ask which add-ons to apply (none by default, and not with `--force`); both take `--addon`. `snapshot:list` shows add-ons after the snapshots. `snapshot:refresh` with table names refuses `--addon`; load an add-on's tables with `snapshot:refresh-table --from=` instead.
 
 Good to know:
 

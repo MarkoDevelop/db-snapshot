@@ -12,12 +12,15 @@ use function Laravel\Prompts\info;
 use function Laravel\Prompts\search;
 use function Laravel\Prompts\select;
 use function Laravel\Prompts\table;
+use function Laravel\Prompts\text;
 
 class ListCommand extends Command
 {
     use Formats;
 
     private const DONE = "\0done";
+
+    private const PRUNE = "\0prune";
 
     protected $signature = 'snapshot:list';
 
@@ -34,15 +37,24 @@ class ListCommand extends Command
         if (! $this->input->isInteractive()) {
             $this->printTable($snapshots->all());
             $this->printAddons($snapshots->addons());
+            $this->printTotal($snapshots);
 
             return self::SUCCESS;
         }
 
+        $this->printTotal($snapshots);
+
         while (($all = $this->listed($snapshots)) !== []) {
-            $name = $this->pickSnapshot($all);
+            $name = $this->pickSnapshot($all, $this->prunable($snapshots->all(), 1) !== []);
 
             if ($name === self::DONE) {
                 return self::SUCCESS;
+            }
+
+            if ($name === self::PRUNE) {
+                $this->prune($snapshots);
+
+                continue;
             }
 
             $snapshot = current(array_filter($all, fn (Snapshot $snapshot): bool => $snapshot->name() === $name));
@@ -106,7 +118,7 @@ class ListCommand extends Command
      *
      * @param  list<Snapshot>  $all
      */
-    private function pickSnapshot(array $all): string
+    private function pickSnapshot(array $all, bool $canPrune): string
     {
         $options = [];
 
@@ -114,14 +126,19 @@ class ListCommand extends Command
             $options[$snapshot->name()] = $snapshot->isAddon() ? 'add-on · '.$this->addonLabel($snapshot) : $this->snapshotLabel($snapshot);
         }
 
+        if ($canPrune) {
+            $options[self::PRUNE] = 'Delete old snapshots…';
+        }
+
         $options[self::DONE] = 'Done';
+        $label = array_filter($all, fn (Snapshot $snapshot): bool => $snapshot->isAddon()) === [] ? 'Which snapshot?' : 'Which snapshot or add-on?';
 
         if (count($all) < 6) {
-            return (string) select(label: 'Which snapshot?', options: $options, default: $all[0]->name(), scroll: 10);
+            return (string) select(label: $label, options: $options, default: $all[0]->name(), scroll: 10);
         }
 
         return (string) search(
-            label: 'Which snapshot?',
+            label: $label,
             options: fn (string $value): array => array_filter(
                 $options,
                 fn (string $label): bool => $value === '' || str_contains(strtolower($label), strtolower($value)),
@@ -129,6 +146,73 @@ class ListCommand extends Command
             placeholder: 'Type to filter by profile, add-on, table, date or name',
             scroll: 10,
         );
+    }
+
+    /**
+     * Delete all but the newest $keep snapshots of each profile. Add-ons stay.
+     */
+    private function prune(SnapshotRepository $snapshots): void
+    {
+        $keep = (int) text(
+            label: 'Keep how many snapshots of each profile?',
+            default: '1',
+            required: true,
+            validate: fn (string $value): ?string => ctype_digit($value) && (int) $value >= 1 ? null : 'A number, 1 or more.',
+            hint: 'The newest ones are kept. Add-ons are not touched.',
+        );
+
+        $old = $this->prunable($snapshots->all(), $keep);
+
+        if ($old === []) {
+            info("No profile has more than {$keep}.");
+
+            return;
+        }
+
+        $bytes = array_sum(array_map(fn (Snapshot $snapshot): int => $snapshot->bytes(), $old));
+        $this->line(implode("\n", array_map(fn (Snapshot $snapshot): string => '  '.$this->snapshotLabel($snapshot), $old)));
+
+        if (! confirm(sprintf('Delete these %d snapshots (%s)?', count($old), $this->formatBytes($bytes)), default: false)) {
+            return;
+        }
+
+        foreach ($old as $snapshot) {
+            File::deleteDirectory($snapshot->path);
+        }
+
+        info(sprintf('Deleted %d snapshots, freed %s.', count($old), $this->formatBytes($bytes)));
+        $this->printTotal($snapshots);
+    }
+
+    /**
+     * Snapshots beyond the newest $keep of their profile.
+     *
+     * @param  list<Snapshot>  $all  newest first
+     * @return list<Snapshot>
+     */
+    private function prunable(array $all, int $keep): array
+    {
+        $seen = [];
+        $old = [];
+
+        foreach ($all as $snapshot) {
+            $seen[$snapshot->profile()] = ($seen[$snapshot->profile()] ?? 0) + 1;
+
+            if ($seen[$snapshot->profile()] > $keep) {
+                $old[] = $snapshot;
+            }
+        }
+
+        return $old;
+    }
+
+    private function printTotal(SnapshotRepository $snapshots): void
+    {
+        $all = $this->listed($snapshots);
+
+        if ($all !== []) {
+            info(sprintf('%s in %s.', $this->formatBytes(array_sum(array_map(fn (Snapshot $snapshot): int => $snapshot->bytes(), $all))), $snapshots->path));
+        }
     }
 
     private function delete(Snapshot $snapshot): void
