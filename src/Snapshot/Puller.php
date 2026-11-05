@@ -37,9 +37,11 @@ final class Puller
      * @param  (Closure(string, ProcessResult, float): void)|null  $onFinished
      * @param  (Closure(list<string>, string): void)|null  $onTick  receives running keys and the snapshot directory
      * @param  bool  $partial  only the profile's tables, without views and routines (see snapshot:refresh-table)
+     * @param  bool  $addon  a partial snapshot kept as an add-on named after the profile
      */
-    public function pull(Profile $profile, int $parallel, ?Closure $onFinished = null, ?Closure $onTick = null, bool $partial = false): Snapshot
+    public function pull(Profile $profile, int $parallel, ?Closure $onFinished = null, ?Closure $onTick = null, bool $partial = false, bool $addon = false): Snapshot
     {
+        $partial = $partial || $addon;
         $now = CarbonImmutable::now();
         $tables = $this->analyzer->tables();
         $name = $now->format('Y-m-d_His').'_'.$profile->name;
@@ -80,9 +82,17 @@ final class Puller
         }
 
         $dataTables = array_keys($manifestTables);
-        $extras = [
-            '_post-data' => $dataTables !== [] ? $this->driver->dumpPostDataCommand($dataTables, $directory.'/'.Snapshot::POST_DATA_FILE) : null,
-        ];
+        $extras = [];
+
+        if ($addon) {
+            File::ensureDirectoryExists($directory.'/'.Snapshot::POST_DATA_DIRECTORY);
+
+            foreach ($dataTables as $table) {
+                $extras["_post-data:{$table}"] = $this->driver->dumpPostDataCommand([$table], $directory.'/'.Snapshot::POST_DATA_DIRECTORY."/{$table}.sql.gz");
+            }
+        } else {
+            $extras['_post-data'] = $dataTables !== [] ? $this->driver->dumpPostDataCommand($dataTables, $directory.'/'.Snapshot::POST_DATA_FILE) : null;
+        }
 
         if (! $partial) {
             $extras['_views'] = $views !== [] ? $this->driver->dumpViewsCommand($views, $directory.'/'.Snapshot::VIEWS_FILE) : null;
@@ -118,6 +128,7 @@ final class Puller
             'database' => $this->driver->database(),
             'created_at' => $now->toIso8601String(),
             'partial' => $partial,
+            ...($addon ? ['addon' => true] : []),
             'tables' => array_map(fn (array $table): array => array_filter([
                 'mode' => $table['mode'],
                 'where' => $table['where'],

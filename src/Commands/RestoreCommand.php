@@ -7,6 +7,7 @@ use Overthink\DbSnapshot\Snapshot\Restorer;
 use Overthink\DbSnapshot\Snapshot\Snapshot;
 use Overthink\DbSnapshot\Snapshot\SnapshotRepository;
 use Overthink\DbSnapshot\Support\DatabaseName;
+use RuntimeException;
 use Throwable;
 
 use function Laravel\Prompts\confirm;
@@ -18,7 +19,7 @@ use function Laravel\Prompts\warning;
 
 class RestoreCommand extends Command
 {
-    use Formats;
+    use PicksAddons;
     use TargetsLocalDatabase;
 
     protected $signature = 'snapshot:restore
@@ -26,6 +27,7 @@ class RestoreCommand extends Command
         {--profile= : Only snapshots of this profile}
         {--database= : Restore into this database instead of the connection\'s own (placeholders like source, profile and date in braces work, see the README)}
         {--parallel= : How many tables to import at a time (default: SNAPSHOT_PARALLEL)}
+        {--addon=* : Apply this saved add-on on top; without a name, pick from a list (asked when add-ons exist, unless --force)}
         {--switch-app : When restoring into another database, set DB_DATABASE to it}
         {--force : Ask nothing: no confirmation before dropping the database}';
 
@@ -44,6 +46,7 @@ class RestoreCommand extends Command
         try {
             $snapshot = $this->chooseSnapshot($snapshots, $this->option('profile') ?: null);
             $connection['database'] = $this->chooseDatabase($snapshot, $appDatabase);
+            $addons = $this->chooseAddons($snapshots, $snapshot);
         } catch (Throwable $exception) {
             error($exception->getMessage());
 
@@ -58,6 +61,14 @@ class RestoreCommand extends Command
             $snapshot->createdAt()->diffForHumans(),
         ));
 
+        foreach ($addons as $addon) {
+            note('Then add-on '.$this->addonLabel($addon));
+
+            if (($gap = $this->addonAgeWarning($addon, $snapshot->createdAt())) !== null) {
+                warning($gap);
+            }
+        }
+
         $target = "{$connection['database']} on {$connection['host']}:{$connection['port']}";
 
         if (! $this->option('force') && ! confirm("Drop and recreate {$target}?", default: false)) {
@@ -69,7 +80,14 @@ class RestoreCommand extends Command
         $startedAt = microtime(true);
 
         try {
-            $warnings = $restorer->restore($snapshot, $connection, $parallel, $this->progressReporter());
+            $warnings = $restorer->restore(
+                $snapshot,
+                $connection,
+                $parallel,
+                $this->progressReporter(),
+                $addons,
+                fn (Snapshot $addon) => $this->line("  Add-on {$addon->profile()}:"),
+            );
         } catch (Throwable $exception) {
             error($exception->getMessage());
 
@@ -80,7 +98,13 @@ class RestoreCommand extends Command
             warning($message);
         }
 
-        info(sprintf('Restored %s into %s in %ds.', $snapshot->name(), $target, (int) (microtime(true) - $startedAt)));
+        info(sprintf(
+            'Restored %s%s into %s in %ds.',
+            $snapshot->name(),
+            $addons === [] ? '' : ' with '.implode(', ', array_map(fn (Snapshot $addon): string => $addon->profile(), $addons)),
+            $target,
+            (int) (microtime(true) - $startedAt),
+        ));
 
         $this->offerToSwitch($connection['database'], $appDatabase);
 
@@ -120,6 +144,44 @@ class RestoreCommand extends Command
             default: $available[0]->name(),
             scroll: 10,
         ));
+    }
+
+    /**
+     * --addon, or, when interactive, a choice among the saved add-ons pulled
+     * with the snapshot's driver. A bare --addon always asks, even with --force.
+     * Oldest first, so newer tables win.
+     *
+     * @return list<Snapshot>
+     */
+    private function chooseAddons(SnapshotRepository $snapshots, Snapshot $snapshot): array
+    {
+        $named = array_values(array_filter($this->option('addon'), fn (?string $name): bool => filled($name)));
+        $addons = array_map(fn (string $name): Snapshot => $snapshots->findAddon($name), $named);
+
+        foreach ($addons as $addon) {
+            if ($addon->driver() !== $snapshot->driver()) {
+                throw new RuntimeException("Add-on {$addon->profile()} was pulled with the {$addon->driver()} driver and {$snapshot->name()} with {$snapshot->driver()}.");
+            }
+        }
+        $picker = $this->wantsAddonPicker('addon');
+
+        if ($picker && ! $this->input->isInteractive()) {
+            throw new RuntimeException('--addon needs a name when not interactive.');
+        }
+
+        $available = array_values(array_filter($snapshots->addons(), fn (Snapshot $addon): bool => $addon->driver() === $snapshot->driver()));
+
+        if ($picker && $available === []) {
+            throw new RuntimeException("There are no add-ons pulled with the {$snapshot->driver()} driver, which {$snapshot->name()} was pulled with.");
+        }
+
+        if ($picker || ($addons === [] && $available !== [] && $this->input->isInteractive() && ! $this->option('force'))) {
+            $addons = $this->pickAddons($available, 'Also apply add-ons?', array_map(fn (Snapshot $addon): string => $addon->name(), $addons));
+        }
+
+        usort($addons, fn (Snapshot $a, Snapshot $b): int => $a->createdAt() <=> $b->createdAt());
+
+        return $addons;
     }
 
     /**

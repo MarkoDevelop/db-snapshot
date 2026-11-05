@@ -119,6 +119,10 @@ return [
     // snapshot:configure and snapshot:pull offer to re-analyze older analyses.
     'analysis_max_age_days' => 30,
 
+    // snapshot:restore warns when an add-on was pulled more than this many
+    // days before or after the snapshot it's applied to.
+    'addon_max_gap_days' => 7,
+
     /*
     |--------------------------------------------------------------------------
     | Anonymizing

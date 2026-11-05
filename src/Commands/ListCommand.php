@@ -25,7 +25,7 @@ class ListCommand extends Command
 
     public function handle(SnapshotRepository $snapshots): int
     {
-        if ($snapshots->all() === []) {
+        if ($this->listed($snapshots) === []) {
             info("No snapshots in {$snapshots->path} yet.");
 
             return self::SUCCESS;
@@ -33,18 +33,40 @@ class ListCommand extends Command
 
         if (! $this->input->isInteractive()) {
             $this->printTable($snapshots->all());
+            $this->printAddons($snapshots->addons());
 
             return self::SUCCESS;
         }
 
-        while (($all = $snapshots->all()) !== []) {
+        while (($all = $this->listed($snapshots)) !== []) {
             $name = $this->pickSnapshot($all);
 
             if ($name === self::DONE) {
                 return self::SUCCESS;
             }
 
-            $snapshot = $snapshots->find($name);
+            $snapshot = current(array_filter($all, fn (Snapshot $snapshot): bool => $snapshot->name() === $name));
+
+            if ($snapshot->isAddon()) {
+                $action = select(
+                    label: "What should happen with add-on {$snapshot->profile()}?",
+                    options: [
+                        'load' => 'Load its tables into the database',
+                        'delete' => 'Delete it',
+                        'back' => 'Back to the list',
+                    ],
+                );
+
+                if ($action === 'load') {
+                    return $this->call('snapshot:refresh-table', ['--from' => $snapshot->name()]);
+                }
+
+                if ($action === 'delete') {
+                    $this->delete($snapshot);
+                }
+
+                continue;
+            }
 
             $action = select(
                 label: "What should happen with {$snapshot->name()}?",
@@ -70,6 +92,16 @@ class ListCommand extends Command
     }
 
     /**
+     * Snapshots, then add-ons, each newest first.
+     *
+     * @return list<Snapshot>
+     */
+    private function listed(SnapshotRepository $snapshots): array
+    {
+        return [...$snapshots->all(), ...$snapshots->addons()];
+    }
+
+    /**
      * A select with a few snapshots, a search with many; newest first.
      *
      * @param  list<Snapshot>  $all
@@ -79,7 +111,7 @@ class ListCommand extends Command
         $options = [];
 
         foreach ($all as $snapshot) {
-            $options[$snapshot->name()] = $this->snapshotLabel($snapshot);
+            $options[$snapshot->name()] = $snapshot->isAddon() ? 'add-on · '.$this->addonLabel($snapshot) : $this->snapshotLabel($snapshot);
         }
 
         $options[self::DONE] = 'Done';
@@ -94,7 +126,7 @@ class ListCommand extends Command
                 $options,
                 fn (string $label): bool => $value === '' || str_contains(strtolower($label), strtolower($value)),
             ),
-            placeholder: 'Type to filter by profile, date or name',
+            placeholder: 'Type to filter by profile, add-on, table, date or name',
             scroll: 10,
         );
     }
@@ -115,6 +147,10 @@ class ListCommand extends Command
      */
     private function printTable(array $all): void
     {
+        if ($all === []) {
+            return;
+        }
+
         table(['Snapshot', 'Profile', 'Tables', 'Size', 'Pulled'], array_map(fn (Snapshot $snapshot): array => [
             $snapshot->name(),
             $snapshot->profile(),
@@ -122,5 +158,23 @@ class ListCommand extends Command
             $this->formatBytes($snapshot->bytes()),
             $snapshot->createdAt()->diffForHumans(),
         ], $all));
+    }
+
+    /**
+     * @param  list<Snapshot>  $addons
+     */
+    private function printAddons(array $addons): void
+    {
+        if ($addons === []) {
+            return;
+        }
+
+        table(['Add-on', 'Tables', 'Size', 'Pulled', 'Directory'], array_map(fn (Snapshot $addon): array => [
+            $addon->profile(),
+            implode(', ', $addon->tables()),
+            $this->formatBytes($addon->bytes()),
+            $addon->createdAt()->diffForHumans(),
+            $addon->name(),
+        ], $addons));
     }
 }

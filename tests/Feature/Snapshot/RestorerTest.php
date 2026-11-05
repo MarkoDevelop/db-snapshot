@@ -190,3 +190,56 @@ it('labels imports that collided and their retries in the progress report', func
 
     expect($reported)->toBe(['✗ users (lock conflict, retrying)', '✓ orders', '✓ users (retry 1)']);
 });
+
+it('applies add-ons after the tables and before the views', function () {
+    Sleep::fake();
+    $commands = [];
+    Process::fake(function ($process) use (&$commands) {
+        $commands[] = commandLine($process);
+
+        return Process::result();
+    });
+    $snapshot = makeSnapshot($this->workspace.'/snapshots/2026-10-08_120000_default', ['orders' => 1]);
+    $addon = makeAddon($this->workspace, 'orders', ['orders' => 2]);
+
+    app(Restorer::class)->restore($snapshot, localConnection(), 1, addons: [$addon]);
+
+    expect($commands)->toHaveCount(5)
+        ->and($commands[2])->toContain($snapshot->path.'/tables/orders.sql.gz')
+        ->and($commands[3])->toContain($addon->path.'/tables/orders.sql.gz')
+        ->and($commands[4])->toContain(Snapshot::VIEWS_FILE);
+});
+
+it('imports only the post-data of the tables it loads from an add-on', function () {
+    Sleep::fake();
+    Process::fake();
+    $addon = makeAddon($this->workspace, 'orders', ['orders' => 1, 'users' => 1]);
+    File::ensureDirectoryExists($addon->path.'/post-data');
+    File::put($addon->path.'/post-data/orders.sql.gz', 'x');
+    File::put($addon->path.'/post-data/users.sql.gz', 'x');
+
+    app(Restorer::class)->importTables($addon, localConnection(), 1, only: ['users']);
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'post-data/users.sql.gz'));
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'post-data/orders.sql.gz'));
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'tables/orders.sql.gz'));
+});
+
+it('restores an add-on\'s own post-data before the views', function () {
+    Sleep::fake();
+    $commands = [];
+    Process::fake(function ($process) use (&$commands) {
+        $commands[] = commandLine($process);
+
+        return Process::result();
+    });
+    $snapshot = makeSnapshot($this->workspace.'/snapshots/2026-10-08_120000_default', ['orders' => 1]);
+    $addon = makeAddon($this->workspace, 'orders', ['orders' => 2]);
+    File::ensureDirectoryExists($addon->path.'/post-data');
+    File::put($addon->path.'/post-data/orders.sql.gz', 'x');
+
+    app(Restorer::class)->restore($snapshot, localConnection(), 1, addons: [$addon]);
+
+    expect($commands[4])->toContain($addon->path.'/post-data/orders.sql.gz')
+        ->and($commands[5])->toContain(Snapshot::VIEWS_FILE);
+});

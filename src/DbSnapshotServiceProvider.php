@@ -4,6 +4,7 @@ namespace Overthink\DbSnapshot;
 
 use Illuminate\Contracts\Foundation\Application;
 use Overthink\DbSnapshot\Analysis\Analyzer;
+use Overthink\DbSnapshot\Commands\AddonCommand;
 use Overthink\DbSnapshot\Commands\AnalyzeCommand;
 use Overthink\DbSnapshot\Commands\ConfigureCommand;
 use Overthink\DbSnapshot\Commands\ListCommand;
@@ -35,6 +36,7 @@ class DbSnapshotServiceProvider extends PackageServiceProvider
                 RestoreCommand::class,
                 RefreshCommand::class,
                 RefreshTableCommand::class,
+                AddonCommand::class,
                 ListCommand::class,
                 ProfilesCommand::class,
             ]);

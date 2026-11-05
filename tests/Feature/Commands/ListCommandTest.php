@@ -105,3 +105,35 @@ it('lets you search the snapshots when there are six or more', function () {
         ->expectsChoice('Which snapshot?', "\0done", ["\0done" => 'Done'])
         ->assertSuccessful();
 });
+
+it('lists add-ons after the snapshots and loads one', function () {
+    prepareListedSnapshots($this->workspace, count: 1);
+    prepareRefresh($this->workspace);
+    $addon = makeAddon($this->workspace, 'orders', ['orders' => 1], createdAt: '2026-10-02T08:00:00+00:00');
+
+    $this->artisan('snapshot:list')
+        ->expectsChoice('Which snapshot?', $addon->name(), [
+            '2026-10-01_080000_default' => '2 days ago · default · 1 B · 2026-10-01_080000_default',
+            $addon->name() => 'add-on · 1 day ago · orders · orders · 1 B',
+            "\0done" => 'Done',
+        ])
+        ->expectsChoice('What should happen with add-on orders?', 'load', [
+            'load' => 'Load its tables into the database',
+            'delete' => 'Delete it',
+            'back' => 'Back to the list',
+        ])
+        ->expectsConfirmation('Replace orders in dev_app?', 'yes')
+        ->assertSuccessful();
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), $addon->path.'/tables/orders.sql.gz'));
+});
+
+it('prints add-ons in their own table when not interactive', function () {
+    prepareListedSnapshots($this->workspace, count: 1);
+    makeAddon($this->workspace, 'all-orders', ['orders' => 1, 'order_items' => 1], createdAt: '2026-10-02T08:00:00+00:00');
+
+    $this->artisan('snapshot:list', ['--no-interaction' => true])
+        ->expectsOutputToContain('2026-10-01_080000_default')
+        ->expectsOutputToContain('all-orders')
+        ->assertSuccessful();
+});
