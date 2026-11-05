@@ -11,14 +11,16 @@ use Overthink\DbSnapshot\Snapshot\Snapshot;
 trait Formats
 {
     /**
-     * Prints one "✓ table  1.2s" line per finished dump or import.
+     * Prints one " 3/12 ✓ table  1.2s" line per finished dump or import.
      *
-     * @return Closure(string, ProcessResult, float): void
+     * @return Closure(string, ProcessResult, float, ?int=, ?int=): void
      */
     protected function progressReporter(): Closure
     {
-        return function (string $key, ProcessResult $result, float $seconds): void {
-            $this->line(sprintf('  %s %-40s %6.1fs', $result->successful() ? '<info>✓</info>' : '<error>✗</error>', $key, $seconds));
+        return function (string $key, ProcessResult $result, float $seconds, ?int $done = null, ?int $total = null): void {
+            $count = $total !== null ? sprintf('%'.strlen((string) $total).'d/%d ', (int) $done, $total) : '';
+
+            $this->line(sprintf('  %s%s %-40s %6.1fs', $count, $result->successful() ? '<info>✓</info>' : '<error>✗</error>', $key, $seconds));
         };
     }
 

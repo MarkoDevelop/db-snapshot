@@ -10,7 +10,6 @@ use Overthink\DbSnapshot\Support\DatabaseName;
 use RuntimeException;
 use Throwable;
 
-use function Laravel\Prompts\confirm;
 use function Laravel\Prompts\error;
 use function Laravel\Prompts\info;
 use function Laravel\Prompts\note;
@@ -71,9 +70,7 @@ class RestoreCommand extends Command
 
         $target = "{$connection['database']} on {$connection['host']}:{$connection['port']}";
 
-        if (! $this->option('force') && ! confirm("Drop and recreate {$target}?", default: false)) {
-            info('Nothing changed.');
-
+        if (! $this->confirmsDestructive("drop and recreate {$target}")) {
             return self::FAILURE;
         }
 

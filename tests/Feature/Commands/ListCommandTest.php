@@ -20,7 +20,7 @@ function listedOptions(int ...$days): array
         $options[$name] = (3 - $day === 1 ? '1 day ago' : (3 - $day).' days ago')." · default · 1 B · {$name}";
     }
 
-    return $options + ["\0done" => 'Done'];
+    return $options + (count($days) > 1 ? ["\0prune" => 'Delete old snapshots…'] : []) + ["\0done" => 'Done'];
 }
 
 function prepareListedSnapshots(string $workspace, int $count = 2): void
@@ -52,6 +52,7 @@ it('restores the chosen snapshot', function () {
         ->expectsChoice('Which snapshot?', '2026-10-01_080000_default', [
             '2026-10-02_080000_default' => '1 day ago · default · 1 B · 2026-10-02_080000_default',
             '2026-10-01_080000_default' => '2 days ago · default · 1 B · 2026-10-01_080000_default',
+            "\0prune" => 'Delete old snapshots…',
             "\0done" => 'Done',
         ])
         ->expectsChoice('What should happen with 2026-10-01_080000_default?', 'restore', LIST_ACTIONS)
@@ -112,7 +113,7 @@ it('lists add-ons after the snapshots and loads one', function () {
     $addon = makeAddon($this->workspace, 'orders', ['orders' => 1], createdAt: '2026-10-02T08:00:00+00:00');
 
     $this->artisan('snapshot:list')
-        ->expectsChoice('Which snapshot?', $addon->name(), [
+        ->expectsChoice('Which snapshot or add-on?', $addon->name(), [
             '2026-10-01_080000_default' => '2 days ago · default · 1 B · 2026-10-01_080000_default',
             $addon->name() => 'add-on · 1 day ago · orders · orders · 1 B',
             "\0done" => 'Done',
@@ -136,4 +137,26 @@ it('prints add-ons in their own table when not interactive', function () {
         ->expectsOutputToContain('2026-10-01_080000_default')
         ->expectsOutputToContain('all-orders')
         ->assertSuccessful();
+});
+
+it('shows the total size and deletes all but the newest snapshots of each profile', function () {
+    prepareListedSnapshots($this->workspace, 3);
+    makeSnapshot($this->workspace.'/snapshots/2026-10-01_090000_nightly', ['orders' => 1], createdAt: '2026-10-01T09:00:00+00:00', profile: 'nightly');
+    $addon = makeAddon($this->workspace, 'orders', ['orders' => 1], createdAt: '2026-10-01T07:00:00+00:00');
+
+    $this->artisan('snapshot:list')
+        ->expectsOutputToContain('5 B in '.$this->workspace.'/snapshots.')
+        ->expectsQuestion('Which snapshot or add-on?', "\0prune")
+        ->expectsQuestion('Keep how many snapshots of each profile?', '1')
+        ->expectsOutputToContain('2026-10-01_080000_default')
+        ->expectsConfirmation('Delete these 2 snapshots (2 B)?', 'yes')
+        ->expectsOutputToContain('Deleted 2 snapshots, freed 2 B.')
+        ->expectsQuestion('Which snapshot or add-on?', "\0done")
+        ->assertSuccessful();
+
+    expect(File::isDirectory($this->workspace.'/snapshots/2026-10-03_080000_default'))->toBeTrue()
+        ->and(File::isDirectory($this->workspace.'/snapshots/2026-10-02_080000_default'))->toBeFalse()
+        ->and(File::isDirectory($this->workspace.'/snapshots/2026-10-01_080000_default'))->toBeFalse()
+        ->and(File::isDirectory($this->workspace.'/snapshots/2026-10-01_090000_nightly'))->toBeTrue()
+        ->and(File::isDirectory($addon->path))->toBeTrue();
 });

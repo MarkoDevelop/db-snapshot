@@ -39,6 +39,7 @@ class ConfigureCommand extends Command
         {profile? : Profile name (asked when there are several; saved as <profile>.json)}
         {--profile= : The same as the profile argument}
         {--from= : Start from a copy of this profile}
+        {--default-mode= : What happens to tables without a rule: full, schema or skip (default: the profile\'s, else full)}
         {--analyze : Re-read the remote database first}';
 
     protected $description = 'Choose which tables a snapshot contains and how much of each';
@@ -65,7 +66,19 @@ class ConfigureCommand extends Command
             return self::FAILURE;
         }
 
-        $existing = new Profile($profileName, $loaded->defaultMode ?? TableMode::Full, $loaded->tables ?? [], $loaded->notPersonal ?? []);
+        $defaultMode = $loaded->defaultMode ?? TableMode::Full;
+
+        if (filled($this->option('default-mode'))) {
+            $defaultMode = TableMode::tryFrom((string) $this->option('default-mode'));
+
+            if (! in_array($defaultMode, [TableMode::Full, TableMode::Schema, TableMode::Skip], true)) {
+                error('--default-mode must be full, schema or skip.');
+
+                return self::FAILURE;
+            }
+        }
+
+        $existing = new Profile($profileName, $defaultMode, $loaded->tables ?? [], $loaded->notPersonal ?? []);
 
         if ($copyFrom !== null) {
             note("Starting from a copy of [{$copyFrom}]; it stays as it is.");
@@ -81,12 +94,13 @@ class ConfigureCommand extends Command
 
         // Large tables and tables that already have a rule, with the rules preselected.
         $listed = array_filter($baseTables, fn (TableInfo $table): bool => $table->bytes() >= $largeMb * 1024 * 1024 || isset($rules[$table->name]));
+        $unruled = self::unruledPhrase($existing->defaultMode);
         $selected = $listed === [] ? [] : multiselect(
-            label: 'Tables that should NOT be copied in full',
+            label: 'Which tables need their own rule?',
             options: array_map(fn (TableInfo $table): string => $this->tableLabel($table, $rules[$table->name] ?? null), $listed),
             default: array_values(array_intersect(array_keys($listed), array_keys($rules))),
             scroll: 15,
-            hint: "Tables of {$largeMb} MB or more and tables with rules. Space to toggle; unselected ones are copied in full.",
+            hint: "Tables of {$largeMb} MB or more and tables with rules. Space to toggle; unselected ones are {$unruled}.",
         );
 
         if ($listed === []) {
@@ -95,7 +109,7 @@ class ConfigureCommand extends Command
 
         $others = array_diff_key($baseTables, $listed);
         $selected = [...$selected, ...($others === [] ? [] : multisearch(
-            label: 'Any other tables to filter, empty or skip? (type to search, Enter for none)',
+            label: 'Any other tables that need their own rule? (type to search, Enter for none)',
             options: fn (string $search): array => array_map(
                 fn (TableInfo $table): string => $this->tableLabel($table, null),
                 array_filter($others, fn (TableInfo $table): bool => $search === '' || str_contains($table->name, $search)),
@@ -104,10 +118,19 @@ class ConfigureCommand extends Command
             scroll: 15,
         ))];
 
+        $toChange = $this->rulesToChange($selected, $rules);
         $newRules = [];
 
         foreach ($selected as $tableName) {
-            $newRules[$tableName] = $this->askRule($analysis->tables[$tableName], $rules[$tableName] ?? null, $newRules);
+            if (isset($rules[$tableName]) && ! in_array($tableName, $toChange, true)) {
+                $newRules[$tableName] = $rules[$tableName];
+            }
+        }
+
+        foreach ($selected as $tableName) {
+            if (! isset($newRules[$tableName])) {
+                $newRules[$tableName] = $this->askRule($analysis->tables[$tableName], $rules[$tableName] ?? null, $newRules);
+            }
         }
 
         $newRules = $this->suggestFollowers($analysis, $newRules);
@@ -131,6 +154,42 @@ class ConfigureCommand extends Command
         $this->offerIndexMigration($profile, $analysis);
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Of the picked tables that already have a rule, the ones to ask about
+     * again. Tables without a rule are always asked about.
+     *
+     * @param  list<string>  $selected
+     * @param  array<string, TableRule>  $rules
+     * @return list<string>
+     */
+    private function rulesToChange(array $selected, array $rules): array
+    {
+        $existing = array_values(array_filter($selected, fn (string $name): bool => isset($rules[$name])));
+
+        if ($existing === []) {
+            return [];
+        }
+
+        return array_map(strval(...), multiselect(
+            label: 'Change any of the current rules?',
+            options: array_combine($existing, array_map(fn (string $name): string => "{$name} · {$rules[$name]->describe()}", $existing)),
+            scroll: 15,
+            hint: 'Enter keeps the unchecked ones as they are.',
+        ));
+    }
+
+    /**
+     * What happens to tables without a rule, for sentences.
+     */
+    private static function unruledPhrase(TableMode $defaultMode): string
+    {
+        return match ($defaultMode) {
+            TableMode::Schema => 'copied as schema only',
+            TableMode::Skip => 'skipped',
+            default => 'copied in full',
+        };
     }
 
     /**
@@ -465,21 +524,23 @@ class ConfigureCommand extends Command
             $estimate = $share !== null ? $table->bytes() * $share : null;
             $after += $estimate ?? $table->bytes();
 
-            if ($rule->mode !== TableMode::Full || $rule->anonymize !== []) {
+            if ($rule->mode !== $profile->defaultMode || $rule->anonymize !== []) {
                 $rows[] = [$table->name, $this->formatBytes($table->bytes()), $rule->describe(), $estimate !== null ? '~'.$this->formatBytes($estimate) : '?'];
             }
         }
 
         if ($rows === []) {
-            note('All tables are copied in full.');
+            note('All tables are '.self::unruledPhrase($profile->defaultMode).'.');
         } else {
             table(['Table', 'Now', 'Rule', 'In snapshot'], $rows);
         }
 
         info(sprintf(
-            'Estimated snapshot: ~%s of %s (before compression; all other tables in full).',
+            'Estimated snapshot: ~%s of %s (before compression). Tables without a rule are %s%s.',
             $this->formatBytes($after),
             $this->formatBytes($before),
+            self::unruledPhrase($profile->defaultMode),
+            $profile->defaultMode === TableMode::Full ? ' (--default-mode=schema or skip changes that)' : '',
         ));
     }
 }

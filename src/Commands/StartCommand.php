@@ -24,7 +24,6 @@ use function Laravel\Prompts\warning;
 class StartCommand extends Command
 {
     use ChoosesProfile;
-    use TargetsLocalDatabase;
     use UsesAnalysis;
 
     protected $signature = 'snapshot
@@ -54,7 +53,7 @@ class StartCommand extends Command
     {
         intro('DB Snapshot');
 
-        if (! $this->ensureConnectionSettings() || ! $this->checkConnection()) {
+        if (! $this->ensureConnection()) {
             return self::FAILURE;
         }
 
@@ -72,27 +71,34 @@ class StartCommand extends Command
             return self::FAILURE;
         }
 
-        if (! confirm("Pull a snapshot with profile [{$profile}] now?")) {
-            outro("Pull later with: php artisan snapshot:pull --profile={$profile}");
+        $next = select(
+            label: "Profile [{$profile}] is ready. What now?",
+            options: [
+                'restore' => 'Pull a snapshot and restore it',
+                'pull' => 'Only pull a snapshot',
+                'later' => 'Nothing for now',
+            ],
+            default: $this->input->isInteractive() ? 'restore' : 'pull',
+        );
+
+        if ($next === 'later') {
+            outro("Pull and restore later with: php artisan snapshot:refresh --profile={$profile}");
 
             return self::SUCCESS;
         }
 
-        // Ask about the restore before pulling, so the rest runs unattended.
-        $database = $this->localConnection()['database'];
-        $restore = confirm("Restore it into {$database} afterwards? This drops and recreates the database.", default: false);
+        // The same questions as snapshot:refresh: where to restore, add-ons, then pull + restore unattended.
+        if ($next === 'restore') {
+            return $this->call('snapshot:refresh', ['--profile' => $profile]);
+        }
 
         if ($this->call('snapshot:pull', ['--profile' => $profile]) !== self::SUCCESS) {
             return self::FAILURE;
         }
 
-        if (! $restore) {
-            outro("Restore later with: php artisan snapshot:restore latest --profile={$profile}");
+        outro("Restore later with: php artisan snapshot:restore latest --profile={$profile}");
 
-            return self::SUCCESS;
-        }
-
-        return $this->call('snapshot:restore', ['snapshot' => 'latest', '--profile' => $profile, '--force' => true]);
+        return self::SUCCESS;
     }
 
     protected function forceAnalyze(): bool
@@ -100,20 +106,63 @@ class StartCommand extends Command
         return $this->option('analyze') || $this->option('fresh');
     }
 
-    private function ensureConnectionSettings(): bool
+    /**
+     * Asks for missing settings, checks them over SSH, and lets the user fix
+     * them until the connection works. Settings typed here are saved only
+     * once they work (or when the user wants them anyway).
+     */
+    private function ensureConnection(): bool
     {
-        if (filled(config('db-snapshot.ssh.host')) && filled(config('db-snapshot.remote.database'))) {
-            return true;
+        $values = null;
+
+        if (blank(config('db-snapshot.ssh.host')) || blank(config('db-snapshot.remote.database'))) {
+            if (! $this->input->isInteractive()) {
+                error('Set SNAPSHOT_SSH_HOST and SNAPSHOT_REMOTE_DB_DATABASE (see the README), or run php artisan snapshot interactively.');
+
+                return false;
+            }
+
+            warning('The connection to the remote database is not configured yet.');
+            $values = $this->askConnectionSettings();
         }
 
-        if (! $this->input->isInteractive()) {
-            error('Set SNAPSHOT_SSH_HOST and SNAPSHOT_REMOTE_DB_DATABASE (see the README), or run php artisan snapshot interactively.');
+        while (! $this->checkConnection()) {
+            if (! $this->input->isInteractive()) {
+                return false;
+            }
 
-            return false;
+            $next = select(
+                label: 'The connection failed. What now?',
+                options: ['edit' => 'Edit the settings', 'retry' => 'Try again', 'quit' => 'Quit'],
+            );
+
+            if ($next === 'quit') {
+                if ($values !== null) {
+                    $this->offerToSave($values, 'Save these settings to %s anyway?', default: false);
+                }
+
+                return false;
+            }
+
+            if ($next === 'edit') {
+                $values = $this->askConnectionSettings();
+            }
         }
 
-        warning('The connection to the remote database is not configured yet.');
+        if ($values !== null) {
+            $this->offerToSave($values, 'Save these settings to %s?');
+        }
 
+        return true;
+    }
+
+    /**
+     * Asks for every setting (the current ones as defaults) and uses them for this run.
+     *
+     * @return array<string, string> env key => value
+     */
+    private function askConnectionSettings(): array
+    {
         $manager = $this->laravel->make(DriverManager::class);
         $available = $manager->available();
         $values = [];
@@ -125,6 +174,7 @@ class StartCommand extends Command
         );
 
         $defaults = $manager->driver($values['SNAPSHOT_DRIVER'])->defaults();
+        $driverChanged = $values['SNAPSHOT_DRIVER'] !== config('db-snapshot.driver');
 
         foreach (self::SETTINGS as $envKey => [$configKey, $label, $default]) {
             $current = (string) config("db-snapshot.{$configKey}");
@@ -134,34 +184,86 @@ class StartCommand extends Command
                 default => $default,
             };
 
+            // Another driver's port and user would be wrong for this one.
+            if ($driverChanged && in_array($configKey, ['remote.port', 'remote.username'], true)) {
+                $current = '';
+            }
+
             $values[$envKey] = text(
                 label: $label,
                 default: $current !== '' ? $current : $default,
                 required: in_array($envKey, ['SNAPSHOT_SSH_HOST', 'SNAPSHOT_REMOTE_DB_DATABASE'], true),
+                validate: $envKey === 'SNAPSHOT_SSH_KEY' ? $this->validateKeyPath(...) : null,
             );
         }
 
-        $values['SNAPSHOT_REMOTE_DB_PASSWORD'] = password(
-            label: 'Database password',
-            hint: 'Leave empty to use the client config of the server user (e.g. ~/.my.cnf).',
-        );
+        $this->warnAboutKeyPermissions($values['SNAPSHOT_SSH_KEY']);
+
+        // Kept passwords stay out of $values, so saving doesn't copy one from the environment into .env.
+        if ((string) config('db-snapshot.remote.password') === '' || ! confirm('Keep the current database password?')) {
+            $values['SNAPSHOT_REMOTE_DB_PASSWORD'] = password(
+                label: 'Database password',
+                hint: 'Leave empty to use the client config of the server user (e.g. ~/.my.cnf).',
+            );
+            config()->set('db-snapshot.remote.password', $values['SNAPSHOT_REMOTE_DB_PASSWORD']);
+        }
 
         foreach (self::SETTINGS as $envKey => [$configKey]) {
             config()->set("db-snapshot.{$configKey}", $configKey === 'ssh.port' || $configKey === 'remote.port' ? (int) $values[$envKey] : $values[$envKey]);
         }
 
-        config()->set('db-snapshot.remote.password', $values['SNAPSHOT_REMOTE_DB_PASSWORD']);
         config()->set('db-snapshot.driver', $values['SNAPSHOT_DRIVER']);
         $manager->forgetDrivers();
 
+        return $values;
+    }
+
+    private function validateKeyPath(string $path): ?string
+    {
+        if ($path === '') {
+            return null;
+        }
+
+        $local = $this->expandHome($path);
+
+        return match (true) {
+            ! file_exists($local) => "There is no file at {$path} on this machine. Use the path as seen where artisan runs (in Docker: inside the container).",
+            is_dir($local) => "{$path} is a directory; point at the private key file.",
+            ! is_readable($local) => "{$path} exists but can't be read by this user.",
+            default => null,
+        };
+    }
+
+    private function warnAboutKeyPermissions(string $path): void
+    {
+        $local = $this->expandHome($path);
+
+        if ($path !== '' && is_file($local) && (fileperms($local) & 0o077) !== 0) {
+            warning("{$path} can be read by other users, and ssh refuses such keys. Run: chmod 600 {$path}");
+        }
+    }
+
+    /**
+     * ssh expands ~ in -i itself; PHP's file functions don't.
+     */
+    private function expandHome(string $path): string
+    {
+        $home = (string) ($_SERVER['HOME'] ?? getenv('HOME'));
+
+        return $home !== '' && ($path === '~' || str_starts_with($path, '~/')) ? $home.substr($path, 1) : $path;
+    }
+
+    /**
+     * @param  array<string, string>  $values
+     */
+    private function offerToSave(array $values, string $question, bool $default = true): void
+    {
         $envPath = $this->laravel->environmentFilePath();
 
-        if (confirm("Save these settings to {$envPath}?")) {
+        if (confirm(sprintf($question, $envPath), default: $default)) {
             (new EnvFile($envPath))->set($values);
             info('Saved.');
         }
-
-        return true;
     }
 
     private function checkConnection(): bool

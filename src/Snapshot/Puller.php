@@ -42,7 +42,7 @@ final class Puller
     private ?array $columns = null;
 
     /**
-     * @param  (Closure(string, ProcessResult, float): void)|null  $onFinished
+     * @param  (Closure(string, ProcessResult, float, ?int, ?int): void)|null  $onFinished
      * @param  (Closure(list<string>, string): void)|null  $onTick  receives running keys and the snapshot directory
      * @param  bool  $partial  only the profile's tables, without views and routines (see snapshot:refresh-table)
      * @param  bool  $addon  a partial snapshot kept as an add-on named after the profile

@@ -23,7 +23,7 @@ it('creates a new add-on from the picker', function () {
         ->expectsQuestion('Name of the new add-on', 'orders')
         ->expectsQuestion('Tables to refresh (type to search)', 'orders')
         ->expectsChoice('Tables to refresh (type to search)', ['orders'], ['orders' => 'orders · 1000 B · ~10 rows'])
-        ->expectsQuestion('orders (1000 B, ~10 rows)', 'full')
+        ->expectsChoice('Change any rule for this run?', [], ['orders' => 'orders · full'])
         ->expectsConfirmation('Replace orders in dev_app?', 'yes')
         ->assertSuccessful();
 
@@ -99,7 +99,7 @@ it('pulls tables into an existing add-on from the menu', function () {
         ])
         ->expectsQuestion('Tables to refresh (type to search)', 'orders')
         ->expectsChoice('Tables to refresh (type to search)', ['orders'], ['orders' => 'orders · 1000 B · ~10 rows'])
-        ->expectsQuestion('orders (1000 B, ~10 rows)', 'full')
+        ->expectsChoice('Change any rule for this run?', [], ['orders' => 'orders · full'])
         ->expectsConfirmation('Replace orders in dev_app?', 'yes')
         ->assertSuccessful();
 

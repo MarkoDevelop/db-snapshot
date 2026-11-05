@@ -69,6 +69,32 @@ trait TargetsLocalDatabase
         info("DB_DATABASE is now {$database}. Run php artisan config:clear if the config is cached.");
     }
 
+    /**
+     * Whether to go ahead with $action ("drop and recreate dev_app"): --force,
+     * or a yes. Without interaction a confirmation would quietly say no, so
+     * this explains how to go ahead instead.
+     */
+    protected function confirmsDestructive(string $action): bool
+    {
+        if ($this->input->hasOption('force') && $this->option('force')) {
+            return true;
+        }
+
+        if (! $this->input->isInteractive()) {
+            error("Not interactive, so nothing was changed. Pass --force to {$action}.");
+
+            return false;
+        }
+
+        if (confirm(ucfirst($action).'?', default: false)) {
+            return true;
+        }
+
+        info('Nothing changed.');
+
+        return false;
+    }
+
     protected function refusesProduction(): bool
     {
         if (! $this->laravel->isProduction()) {

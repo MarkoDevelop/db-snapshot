@@ -59,8 +59,8 @@ it('offers a new profile where profiles are made', function () {
     $this->artisan('snapshot:configure')
         ->expectsChoice('Which profile?', "\0new", ['default' => 'default · 0 rules · never pulled', 'nightly' => 'nightly · 0 rules · never pulled', "\0new" => 'New profile…', "\0copy" => 'Copy a profile…'])
         ->expectsQuestion('Name of the new profile', 'weekly')
-        ->expectsQuestion('Any other tables to filter, empty or skip? (type to search, Enter for none)', 'orders')
-        ->expectsChoice('Any other tables to filter, empty or skip? (type to search, Enter for none)', ['orders'], ['orders' => 'orders · 1000 B · ~10 rows'])
+        ->expectsQuestion('Any other tables that need their own rule? (type to search, Enter for none)', 'orders')
+        ->expectsChoice('Any other tables that need their own rule? (type to search, Enter for none)', ['orders'], ['orders' => 'orders · 1000 B · ~10 rows'])
         ->expectsChoice('orders (1000 B, ~10 rows)', 'schema', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
         ->expectsConfirmation('Save profile [weekly]?', 'yes')
         ->assertSuccessful();
@@ -76,8 +76,8 @@ it('asks which profile to edit even when there is only one', function () {
         ->expectsChoice('Which profile?', "\0copy", ['default' => 'default · 0 rules · never pulled', "\0new" => 'New profile…', "\0copy" => 'Copy a profile…'])
         ->expectsQuestion('Name of the new profile', 'default-copy')
         ->expectsOutputToContain('Starting from a copy of [default]')
-        ->expectsQuestion('Any other tables to filter, empty or skip? (type to search, Enter for none)', 'orders')
-        ->expectsChoice('Any other tables to filter, empty or skip? (type to search, Enter for none)', ['orders'], ['orders' => 'orders · 1000 B · ~10 rows'])
+        ->expectsQuestion('Any other tables that need their own rule? (type to search, Enter for none)', 'orders')
+        ->expectsChoice('Any other tables that need their own rule? (type to search, Enter for none)', ['orders'], ['orders' => 'orders · 1000 B · ~10 rows'])
         ->expectsChoice('orders (1000 B, ~10 rows)', 'full', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
         ->expectsConfirmation('Save profile [default-copy]?', 'yes')
         ->assertSuccessful();

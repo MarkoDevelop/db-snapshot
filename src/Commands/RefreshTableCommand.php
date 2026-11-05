@@ -151,9 +151,7 @@ class RefreshTableCommand extends Command
         $connection = $this->localConnection();
         $connection['database'] = $this->option('database') ?: $connection['database'];
 
-        if (! $this->option('force') && ! confirm('Replace '.implode(', ', $tables)." in {$connection['database']}?", default: false)) {
-            info('Nothing changed.');
-
+        if (! $this->confirmsDestructive('replace '.implode(', ', $tables)." in {$connection['database']}")) {
             return self::FAILURE;
         }
 
@@ -199,7 +197,10 @@ class RefreshTableCommand extends Command
         $unknown = array_diff($names, array_keys($tables));
 
         if ($unknown !== []) {
-            error('Unknown tables: '.implode(', ', $unknown));
+            error('Unknown tables: '.implode(', ', array_map(
+                fn (string $name): string => $name.(($guess = $this->closestTable($name, array_keys($tables))) !== null ? " (did you mean {$guess}?)" : ''),
+                $unknown,
+            )));
 
             return self::FAILURE;
         }
@@ -218,16 +219,21 @@ class RefreshTableCommand extends Command
 
         foreach ($names as $name) {
             $rule = $profile->ruleFor($name);
+            // Asking for a skipped table means wanting its rows.
+            $rules[$name] = $rule->mode === TableMode::Skip ? new TableRule(TableMode::Full) : $rule;
+        }
 
-            if ($rule->mode === TableMode::Skip) {
-                $rule = new TableRule(TableMode::Full);
-            }
+        // Picked from the list: the profile's rules, changeable for this run. Followers keep following.
+        $changeable = $this->input->isInteractive() && $this->argument('tables') === []
+            ? array_values(array_diff(array_keys($rules), $followers))
+            : [];
 
-            $rules[$name] = $this->input->isInteractive() && $this->argument('tables') === [] && ! in_array($name, $followers, true)
-                ? $this->askRule($tables[$name], $rule, array_diff_key([...$profile->tables, ...$rules], [$name => true]))
-                : $rule;
+        foreach ($this->rulesToChange($rules, $changeable) as $name) {
+            $rules[$name] = $this->askRule($tables[$name], $rules[$name], array_diff_key([...$profile->tables, ...$rules], [$name => true]));
+        }
 
-            note("{$name}: {$rules[$name]->describe()}");
+        foreach ($rules as $name => $rule) {
+            note("{$name}: {$rule->describe()}");
         }
 
         $rules = array_filter($rules, fn (TableRule $rule): bool => $rule->mode !== TableMode::Skip);
@@ -245,17 +251,31 @@ class RefreshTableCommand extends Command
             $save = $this->askWhereToSave($snapshots, array_keys($rules));
         }
 
-        if (! $this->option('force')) {
-            if ($save === null && $this->input->isInteractive() && ! $this->option('keep')
-                && confirm('Also save these tables as an add-on, to apply on top of later restores?', default: false)) {
-                $save = $this->askWhereToSave($snapshots, array_keys($rules));
-            }
+        $action = 'replace '.implode(', ', array_keys($rules))." in {$connection['database']}";
 
-            if (! confirm('Replace '.implode(', ', array_keys($rules))." in {$connection['database']}?", default: false)) {
+        if (! $this->option('force') && $save === null && $this->input->isInteractive() && ! $this->option('keep')) {
+            // One question for both: replace, and whether to keep the pulled tables as an add-on.
+            $choice = select(
+                label: ucfirst($action).'?',
+                options: [
+                    'replace' => 'Yes',
+                    'save' => 'Yes, and save them as an add-on to apply on top of later restores',
+                    'cancel' => 'No',
+                ],
+                default: 'cancel',
+            );
+
+            if ($choice === 'cancel') {
                 info('Nothing changed.');
 
                 return self::FAILURE;
             }
+
+            if ($choice === 'save') {
+                $save = $this->askWhereToSave($snapshots, array_keys($rules));
+            }
+        } elseif (! $this->confirmsDestructive($action)) {
+            return self::FAILURE;
         }
 
         if ($save !== null && ($mismatch = $this->addonOfOtherDriver($snapshots, $save)) !== null) {
@@ -314,6 +334,48 @@ class RefreshTableCommand extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Of $changeable, the tables whose rule to ask for again; Enter keeps them all.
+     *
+     * @param  array<string, TableRule>  $rules
+     * @param  list<string>  $changeable
+     * @return list<string>
+     */
+    private function rulesToChange(array $rules, array $changeable): array
+    {
+        if ($changeable === []) {
+            return [];
+        }
+
+        return array_map(strval(...), multiselect(
+            label: 'Change any rule for this run?',
+            options: array_combine($changeable, array_map(fn (string $name): string => "{$name} · {$rules[$name]->describe()}", $changeable)),
+            scroll: 15,
+            hint: 'The profile\'s rules, unchanged in the profile. Enter keeps the unchecked ones.',
+        ));
+    }
+
+    /**
+     * The known table closest to a mistyped $name, if any is close.
+     *
+     * @param  list<string>  $known
+     */
+    private function closestTable(string $name, array $known): ?string
+    {
+        $best = null;
+        $bestDistance = PHP_INT_MAX;
+
+        foreach ($known as $candidate) {
+            $distance = levenshtein(strtolower($name), strtolower($candidate));
+
+            if ($distance < $bestDistance) {
+                [$best, $bestDistance] = [$candidate, $distance];
+            }
+        }
+
+        return $best !== null && $bestDistance <= max(2, intdiv(strlen($name), 3)) ? $best : null;
     }
 
     /**
