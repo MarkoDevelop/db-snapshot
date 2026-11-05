@@ -9,6 +9,8 @@ final class TableRule
 {
     /**
      * @param  array<string, ColumnRule>  $anonymize  column => how to anonymize it
+     * @param  ?string  $parent  for "follow": the table whose copied rows decide which rows are copied
+     * @param  ?string  $references  for "follow": the parent's column that $column points at (id when null)
      */
     public function __construct(
         public readonly TableMode $mode,
@@ -17,6 +19,8 @@ final class TableRule
         public readonly ?string $since = null,
         public readonly ?string $where = null,
         public readonly array $anonymize = [],
+        public readonly ?string $parent = null,
+        public readonly ?string $references = null,
     ) {
         if ($anonymize !== [] && in_array($mode, [TableMode::Schema, TableMode::Skip], true)) {
             throw new InvalidArgumentException('"anonymize" only applies to rules that copy rows.');
@@ -46,13 +50,21 @@ final class TableRule
             }
         }
 
+        if ($mode === TableMode::Follow) {
+            foreach (['column' => $column, 'parent' => $parent, 'references' => $references ?? 'id'] as $key => $value) {
+                if ($value === null || ! preg_match('/^[A-Za-z0-9_$-]+$/', $value)) {
+                    throw new InvalidArgumentException("A \"follow\" rule needs a valid \"{$key}\".");
+                }
+            }
+        }
+
         if ($mode === TableMode::Where && trim((string) $where) === '') {
             throw new InvalidArgumentException('A "where" rule needs a "where" clause.');
         }
     }
 
     /**
-     * @param  array{mode: string, column?: string, months?: int, since?: string, where?: string, anonymize?: array<string, string|array<string, string>>}  $data
+     * @param  array{mode: string, column?: string, months?: int, since?: string, where?: string, parent?: string, references?: string, anonymize?: array<string, string|array<string, string>>}  $data
      */
     public static function fromArray(array $data): self
     {
@@ -63,11 +75,13 @@ final class TableRule
             $data['since'] ?? null,
             $data['where'] ?? null,
             array_map(ColumnRule::fromJson(...), $data['anonymize'] ?? []),
+            $data['parent'] ?? null,
+            $data['references'] ?? null,
         );
     }
 
     /**
-     * @return array{mode: string, column?: string, months?: int, since?: string, where?: string, anonymize?: array<string, string|array<string, string>>}
+     * @return array{mode: string, parent?: string, column?: string, references?: string, months?: int, since?: string, where?: string, anonymize?: array<string, string|array<string, string>>}
      */
     public function toArray(): array
     {
@@ -76,7 +90,9 @@ final class TableRule
 
         return array_filter([
             'mode' => $this->mode->value,
+            'parent' => $this->parent,
             'column' => $this->column,
+            'references' => $this->references === 'id' ? null : $this->references,
             'months' => $this->months,
             'since' => $this->since,
             'where' => $this->where,
@@ -91,7 +107,15 @@ final class TableRule
      */
     public function withAnonymize(array $anonymize): self
     {
-        return new self($this->mode, $this->column, $this->months, $this->since, $this->where, $anonymize);
+        return new self($this->mode, $this->column, $this->months, $this->since, $this->where, $anonymize, $this->parent, $this->references);
+    }
+
+    /**
+     * The parent's column a "follow" rule points at.
+     */
+    public function referencedColumn(): string
+    {
+        return $this->references ?? 'id';
     }
 
     /**
@@ -117,6 +141,7 @@ final class TableRule
                 ? "last {$this->months} months by {$this->column}"
                 : "{$this->column} since {$this->since}",
             TableMode::Where => "where {$this->where}",
+            TableMode::Follow => "rows of copied {$this->parent} by {$this->column}",
             default => $this->mode->value,
         };
 

@@ -19,7 +19,7 @@ The individual steps are commands too:
 
 ```bash
 php artisan snapshot             # guided: setup → analyze → configure → pull → restore
-php artisan snapshot:analyze     # sizes, rows and date columns of every remote table → database/snapshot-analysis.json
+php artisan snapshot:analyze     # sizes, rows, date columns and relations of every remote table → database/snapshot-analysis.json
 php artisan snapshot:configure   # choose what to copy (searchable TUI), saved as a profile
 php artisan snapshot:pull        # stream per-table gzipped dumps over SSH, in parallel
 php artisan snapshot:restore     # drop + recreate the local DB from the latest snapshot
@@ -113,6 +113,8 @@ A profile looks like this:
         "event_logs": { "mode": "recent", "column": "created_at", "months": 3 },
         "failed_jobs": { "mode": "schema" },
         "imports": { "mode": "recent", "column": "created_at", "since": "2025-01-01" },
+        "order_items": { "mode": "follow", "parent": "orders", "column": "order_id" },
+        "orders": { "mode": "recent", "column": "created_at", "months": 6 },
         "telescope_entries": { "mode": "skip" },
         "users": { "mode": "where", "where": "deleted_at IS NULL" }
     }
@@ -125,6 +127,7 @@ A profile looks like this:
 | `schema` | table structure only |
 | `recent` | rows where `column >= now - months` (whole days) or `column >= since` |
 | `where` | rows matching a custom `WHERE` clause |
+| `follow` | rows whose `column` points at a row the `parent` table copies (see [Following other tables](#following-other-tables)) |
 | `skip` | the table is left out |
 
 Tables the profile doesn't list use `default_mode`, so a new table on the server is never silently dropped. `months` is relative, so a profile stays current without editing.
@@ -133,13 +136,39 @@ In `snapshot:configure`, large tables (over `large_table_mb`, 200 MB by default)
 
 At the end you choose the name to save under, so one run can turn `default` into a new `nightly` profile. A different existing profile is only overwritten after you confirm.
 
-If a `recent` rule filters on a date column without an index, the server has to scan the whole table to find the recent rows. `snapshot:configure` lists those columns and offers to generate a migration (`database/migrations/…_add_snapshot_date_indexes.php`) that adds the indexes. Review it and deploy it like any other migration. InnoDB builds indexes online, but on very large tables it still takes a while.
+If a `recent` or `follow` rule filters on a column without an index, the server has to scan the whole table to find the rows. `snapshot:configure` lists those columns and offers to generate a migration (`database/migrations/…_add_snapshot_indexes.php`) that adds the indexes. Review it and deploy it like any other migration. InnoDB builds indexes online, but on very large tables it still takes a while.
 
-Filtering by date leaves rows in other tables that point at rows not copied. Restores run with foreign key checks off, so this is fine for development, but keep it in mind when you pick rules.
+### Following other tables
+
+Keeping six months of `orders` is only half the job: `order_items`, `order_serials` and `shipments` should keep the rows of those orders, not all of theirs. Give them a `follow` rule:
+
+```json
+"orders": { "mode": "recent", "column": "created_at", "months": 6 },
+"order_items": { "mode": "follow", "parent": "orders", "column": "order_id" },
+"order_serials": { "mode": "follow", "parent": "order_items", "column": "order_item_id" }
+```
+
+The rows are picked on the server with `order_id IN (SELECT id FROM orders WHERE …)`, nested along the chain, so `order_serials` gets the serials of the items of the last six months of orders. Add `"references": "number"` when the column points at something other than the parent's `id`.
+
+You rarely write these by hand:
+
+1. `snapshot:analyze` records how tables point at each other: real foreign keys, plus `<name>_id` columns whose name matches a table with an `id` of the same kind of type (so `order_id` → `orders`). An analysis made before this feature has no relations; `snapshot:configure` says so, and re-running `snapshot:analyze` fixes it. Polymorphic pairs (`commentable_id` next to `commentable_type`) are left out.
+2. `snapshot:configure`, once your rules are set, lists the tables pointing at filtered ones like `orders`, all checked: Enter makes them follow. A table pointing at several filtered tables is offered the one filtered by date, and nothing that would go in a circle is offered. Then it does the same for their own children. Guessed relations say so in the list, so uncheck the ones that are wrong. A table with relations also has **Follow** in its mode list.
+3. `snapshot:refresh-table orders`, pulling from the server, asks whether to refresh the followers too (with `--no-interaction` it only names them). Refreshing only `order_items` uses the `orders` rule from the profile, so it still gets just the items of the copied orders.
+
+Good to know:
+
+- A follower of a `full` parent is copied in full, and a follower of a `schema` or `skip` parent gets no rows. `snapshot:pull` warns about the latter, since it's usually a forgotten parent rule.
+- The tables and columns of a follow rule are checked before anything is dumped, including that the two columns can be compared without a cast (a text column following a numeric `id` would scan the whole table, or fail on PostgreSQL). A parent's `where` may use `ORDER BY … LIMIT`.
+- Rows whose column is `NULL` aren't copied by a follower.
+- On MySQL, the subquery needs the dump to run without table locks. The default `dump_options` (`--single-transaction --skip-lock-tables`) do that.
+- Tables are dumped one by one, so an order created during a pull can be missing while its items are there. With foreign key checks off (MySQL) or `NOT VALID` foreign keys (PostgreSQL), that's harmless.
+
+Other filters leave rows in other tables that point at rows not copied. Restores run with foreign key checks off, so this is fine for development, but keep it in mind when you pick rules.
 
 ## Analysis
 
-`snapshot:analyze` writes `database/snapshot-analysis.json`: every remote table with its size, row count and date columns, plus the date range of indexed date columns on large tables. Commit it, so teammates can run `snapshot:configure` without touching the server first.
+`snapshot:analyze` writes `database/snapshot-analysis.json`: every remote table with its size, row count and date columns, plus the date range of indexed date columns on large tables, and the relations between tables used by `follow` rules. Commit it, so teammates can run `snapshot:configure` without touching the server first.
 
 `snapshot:configure` and `snapshot:pull` check how old the analysis is. If it's older than `analysis_max_age_days` (30 by default), they ask whether to **Analyze now** or continue with the current one. Without interaction they only warn. Pass `--analyze` to either command to refresh it without being asked.
 
@@ -306,7 +335,7 @@ Everything database-specific lives in a driver: reading the schema catalog, buil
 
 How it differs from mysql, because `pg_dump` has no `--where` and Postgres has no "foreign key checks off" switch:
 
-- Filtered tables (`recent`, `where`) are dumped as their definition plus `COPY` of a `SELECT … WHERE …`. Afterwards each sequence the table owns is moved past the highest restored id.
+- Filtered tables (`recent`, `where`, `follow`) are dumped as their definition plus `COPY` of a `SELECT … WHERE …`. Afterwards each sequence the table owns is moved past the highest restored id.
 - Indexes, constraints and triggers of all tables go into one post-data file that is restored after every table is loaded. Foreign keys are created `NOT VALID`: rows that point at filtered-out rows stay, and new rows are still checked.
 - Extensions and functions of the schema are restored before the tables, since columns and defaults may use them.
 - The restore drops statements that newer `pg_dump` versions write but older `psql` clients reject (`SET transaction_timeout`, `\restrict`).
@@ -336,7 +365,7 @@ public function boot(): void
 SNAPSHOT_DRIVER=sqlsrv
 ```
 
-`MysqlDriver` is the reference implementation.
+`MysqlDriver` is the reference implementation. Two contracts are optional: `AnonymizesColumns` for [anonymizing](#anonymizing-personal-data), and `FollowsRelations` (foreign keys, indexed columns and the `IN (SELECT …)` condition) for `follow` rules.
 
 ## Running in Docker
 

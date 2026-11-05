@@ -35,6 +35,74 @@ final class Profile
         if (! in_array($defaultMode, [TableMode::Full, TableMode::Schema, TableMode::Skip], true)) {
             throw new InvalidArgumentException('"default_mode" must be full, schema or skip.');
         }
+
+        foreach (array_keys($tables) as $table) {
+            $this->followChain((string) $table);
+        }
+    }
+
+    /**
+     * The tables $table follows, nearest first.
+     *
+     * @return list<string>
+     */
+    public function followChain(string $table): array
+    {
+        $chain = [];
+        $current = $table;
+
+        while (($rule = $this->tables[$current] ?? null)?->mode === TableMode::Follow) {
+            $current = (string) $rule->parent;
+
+            if ($current === $table || in_array($current, $chain, true)) {
+                throw new InvalidArgumentException('"follow" rules go in a circle: '.implode(' → ', [$table, ...$chain, $current]).'.');
+            }
+
+            $chain[] = $current;
+        }
+
+        return $chain;
+    }
+
+    /**
+     * Followers whose chain starts at a table that copies no rows (schema or
+     * skip, also through default_mode), so they get no rows either.
+     *
+     * @param  ?list<string>  $tables  only these followers
+     * @return array<string, string> follower => the table copying no rows
+     */
+    public function emptyFollowers(?array $tables = null): array
+    {
+        $empty = [];
+
+        foreach ($this->tables as $name => $rule) {
+            $chain = $rule->mode === TableMode::Follow ? $this->followChain((string) $name) : [];
+            $root = $chain[array_key_last($chain) ?? 0] ?? null;
+
+            if ($root !== null && ($tables === null || in_array($name, $tables, true))
+                && in_array($this->ruleFor($root)->mode, [TableMode::Schema, TableMode::Skip], true)) {
+                $empty[(string) $name] = $root;
+            }
+        }
+
+        return $empty;
+    }
+
+    /**
+     * Tables that follow $table, directly or through other followers.
+     *
+     * @return list<string>
+     */
+    public function followers(string $table): array
+    {
+        $followers = array_keys(array_filter(
+            $this->tables,
+            fn (TableRule $rule, string $name): bool => $rule->mode === TableMode::Follow && in_array($table, $this->followChain($name), true),
+            ARRAY_FILTER_USE_BOTH,
+        ));
+        sort($followers);
+
+        return $followers;
     }
 
     /**

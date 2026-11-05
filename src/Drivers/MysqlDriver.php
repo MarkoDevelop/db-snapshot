@@ -9,6 +9,7 @@ use Overthink\DbSnapshot\Analysis\ColumnInfo;
 use Overthink\DbSnapshot\Analysis\DateColumn;
 use Overthink\DbSnapshot\Analysis\TableInfo;
 use Overthink\DbSnapshot\Contracts\AnonymizesColumns;
+use Overthink\DbSnapshot\Contracts\FollowsRelations;
 use Overthink\DbSnapshot\Contracts\RetriesConflictingImports;
 use Overthink\DbSnapshot\Profile\AnonymizeStrategy;
 use Overthink\DbSnapshot\Profile\ColumnRule;
@@ -17,7 +18,7 @@ use Overthink\DbSnapshot\Profile\ColumnRule;
  * MySQL and MariaDB: information_schema, mysqldump on the server and the
  * mysql client locally.
  */
-class MysqlDriver extends SshDriver implements AnonymizesColumns, RetriesConflictingImports
+class MysqlDriver extends SshDriver implements AnonymizesColumns, FollowsRelations, RetriesConflictingImports
 {
     /**
      * Dumps from a GTID-enabled server start with SET @@GLOBAL.GTID_PURGED.
@@ -215,6 +216,58 @@ class MysqlDriver extends SshDriver implements AnonymizesColumns, RetriesConflic
             self::printLine('COMMIT;'),
             $mysqldump(['--no-create-info', '--no-data', '--triggers']),
         ]), $file);
+    }
+
+    public function foreignKeys(): array
+    {
+        $database = $this->quote($this->database());
+        $rows = $this->select(
+            'SELECT k.TABLE_NAME, k.COLUMN_NAME, k.REFERENCED_TABLE_NAME, k.REFERENCED_COLUMN_NAME'
+            .' FROM information_schema.KEY_COLUMN_USAGE k'
+            ." WHERE k.TABLE_SCHEMA = {$database} AND k.REFERENCED_TABLE_SCHEMA = {$database} AND k.REFERENCED_TABLE_NAME IS NOT NULL"
+            .' AND NOT EXISTS (SELECT 1 FROM information_schema.KEY_COLUMN_USAGE o WHERE o.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA'
+            .' AND o.TABLE_NAME = k.TABLE_NAME AND o.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND o.ORDINAL_POSITION > 1)'
+            .' ORDER BY k.TABLE_NAME, k.COLUMN_NAME'
+        );
+
+        $keys = [];
+
+        foreach ($rows as [$table, $column, $parent, $references]) {
+            $keys[$table][] = ['column' => $column, 'parent' => $parent, 'references' => $references];
+        }
+
+        return $keys;
+    }
+
+    public function indexedColumns(): array
+    {
+        $rows = $this->select(
+            'SELECT DISTINCT TABLE_NAME, COLUMN_NAME FROM information_schema.STATISTICS'
+            .' WHERE TABLE_SCHEMA = '.$this->quote($this->database()).' AND SEQ_IN_INDEX = 1'
+        );
+
+        $columns = [];
+
+        foreach ($rows as [$table, $column]) {
+            $columns[$table][] = $column;
+        }
+
+        return $columns;
+    }
+
+    /**
+     * The parent is named with its database, because anonymized tables are
+     * read by a client without a default database. The extra derived table
+     * lets a parent's where use LIMIT, which MySQL refuses directly inside
+     * IN (…); without LIMIT the optimizer merges it away.
+     */
+    public function followCondition(string $column, string $parent, string $references, ?string $parentWhere): string
+    {
+        $references = $this->identifier($references);
+
+        return $this->identifier($column)." IN (SELECT {$references} FROM (SELECT {$references}"
+            .' FROM '.$this->identifier($this->database()).'.'.$this->identifier($parent)
+            .($parentWhere !== null ? " WHERE {$parentWhere}" : '').') AS '.$this->identifier("_{$parent}").')';
     }
 
     public function recentCondition(string $column, CarbonImmutable $since): string

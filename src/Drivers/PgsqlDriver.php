@@ -8,6 +8,7 @@ use Overthink\DbSnapshot\Analysis\ColumnInfo;
 use Overthink\DbSnapshot\Analysis\DateColumn;
 use Overthink\DbSnapshot\Analysis\TableInfo;
 use Overthink\DbSnapshot\Contracts\AnonymizesColumns;
+use Overthink\DbSnapshot\Contracts\FollowsRelations;
 use Overthink\DbSnapshot\Contracts\RetriesConflictingImports;
 use Overthink\DbSnapshot\Profile\AnonymizeStrategy;
 use Overthink\DbSnapshot\Profile\ColumnRule;
@@ -21,7 +22,7 @@ use Overthink\DbSnapshot\Profile\ColumnRule;
  * is restored after all rows are in; foreign keys are created NOT VALID, so
  * rows that point at filtered-out rows don't stop the restore.
  */
-class PgsqlDriver extends SshDriver implements AnonymizesColumns, RetriesConflictingImports
+class PgsqlDriver extends SshDriver implements AnonymizesColumns, FollowsRelations, RetriesConflictingImports
 {
     /**
      * @param  array{host?: ?string, user?: ?string, port?: int, key?: ?string, options?: list<string>}  $ssh
@@ -132,6 +133,51 @@ class PgsqlDriver extends SshDriver implements AnonymizesColumns, RetriesConflic
         }
 
         return $ranges;
+    }
+
+    public function foreignKeys(): array
+    {
+        $rows = $this->select(
+            'SELECT c.relname, a.attname, p.relname, pa.attname'
+            .' FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace'
+            .' JOIN pg_class p ON p.oid = k.confrelid AND p.relnamespace = n.oid'
+            .' JOIN pg_attribute a ON a.attrelid = k.conrelid AND a.attnum = k.conkey[1]'
+            .' JOIN pg_attribute pa ON pa.attrelid = k.confrelid AND pa.attnum = k.confkey[1]'
+            ." WHERE k.contype = 'f' AND n.nspname = ".$this->quote($this->schema).' AND array_length(k.conkey, 1) = 1'
+            .' ORDER BY c.relname, a.attname'
+        );
+
+        $keys = [];
+
+        foreach ($rows as [$table, $column, $parent, $references]) {
+            $keys[$table][] = ['column' => $column, 'parent' => $parent, 'references' => $references];
+        }
+
+        return $keys;
+    }
+
+    public function indexedColumns(): array
+    {
+        $rows = $this->select(
+            'SELECT DISTINCT c.relname, a.attname'
+            .' FROM pg_index i JOIN pg_class c ON c.oid = i.indrelid JOIN pg_namespace n ON n.oid = c.relnamespace'
+            .' JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = i.indkey[0]'
+            .' WHERE n.nspname = '.$this->quote($this->schema)
+        );
+
+        $columns = [];
+
+        foreach ($rows as [$table, $column]) {
+            $columns[$table][] = $column;
+        }
+
+        return $columns;
+    }
+
+    public function followCondition(string $column, string $parent, string $references, ?string $parentWhere): string
+    {
+        return $this->identifier($column).' IN (SELECT '.$this->identifier($references).' FROM '.$this->qualified($parent)
+            .($parentWhere !== null ? " WHERE {$parentWhere}" : '').')';
     }
 
     public function recentCondition(string $column, CarbonImmutable $since): string

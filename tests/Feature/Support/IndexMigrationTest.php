@@ -4,6 +4,7 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
 use Overthink\DbSnapshot\Analysis\Analysis;
 use Overthink\DbSnapshot\Analysis\DateColumn;
+use Overthink\DbSnapshot\Analysis\Relation;
 use Overthink\DbSnapshot\Analysis\TableInfo;
 use Overthink\DbSnapshot\Profile\Profile;
 use Overthink\DbSnapshot\Profile\TableMode;
@@ -26,6 +27,20 @@ it('lists only non-indexed date columns that recent rules filter on', function (
     expect(IndexMigration::missingIndexes($profile, $analysis))->toBe(['event_logs' => ['created_at']]);
 });
 
+it('lists non-indexed columns that follow rules filter on', function () {
+    $analysis = new Analysis('production', now()->toImmutable(), [
+        'order_items' => new TableInfo('order_items', false, 10, 10, 0, relations: [new Relation('order_id', 'orders')]),
+        'order_notes' => new TableInfo('order_notes', false, 10, 10, 0, relations: [new Relation('order_id', 'orders', guessed: true, indexed: false)]),
+    ]);
+
+    $profile = new Profile('default', TableMode::Full, [
+        'order_items' => new TableRule(TableMode::Follow, 'order_id', parent: 'orders'),
+        'order_notes' => new TableRule(TableMode::Follow, 'order_id', parent: 'orders'),
+    ]);
+
+    expect(IndexMigration::missingIndexes($profile, $analysis))->toBe(['order_notes' => ['order_id']]);
+});
+
 it('generates a migration that adds and drops the indexes', function () {
     Schema::create('event_logs', function (Blueprint $table) {
         $table->id();
@@ -36,7 +51,7 @@ it('generates a migration that adds and drops the indexes', function () {
     $path = IndexMigration::write($this->workspace.'/migrations', ['event_logs' => ['created_at', 'processed_at']], now()->toImmutable()->setDate(2026, 10, 9)->setTime(8, 30));
     $migration = require $path;
 
-    expect(basename($path))->toBe('2026_10_09_083000_add_snapshot_date_indexes.php');
+    expect(basename($path))->toBe('2026_10_09_083000_add_snapshot_indexes.php');
 
     $migration->up();
     expect(Schema::hasIndex('event_logs', ['created_at']))->toBeTrue()

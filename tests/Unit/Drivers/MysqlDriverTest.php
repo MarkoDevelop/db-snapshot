@@ -171,3 +171,10 @@ it('dumps anonymized tables as generated inserts with triggers after the rows', 
         '-- mysqldump --host=127.0.0.1 --port=3306 --user=root --no-create-info --no-data --triggers production users',
     ]);
 });
+
+it('wraps the followed parent in a derived table, so its where may use LIMIT', function () {
+    $driver = new MysqlDriver(['host' => 'db.example.test'], ['database' => 'production']);
+
+    expect($driver->followCondition('order_number', 'orders', 'number', '1 ORDER BY id DESC LIMIT 100'))
+        ->toBe('`order_number` IN (SELECT `number` FROM (SELECT `number` FROM `production`.`orders` WHERE 1 ORDER BY id DESC LIMIT 100) AS `_orders`)');
+});

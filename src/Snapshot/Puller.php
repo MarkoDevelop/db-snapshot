@@ -13,6 +13,7 @@ use Overthink\DbSnapshot\Analysis\ColumnInfo;
 use Overthink\DbSnapshot\Analysis\TableInfo;
 use Overthink\DbSnapshot\Contracts\AnonymizesColumns;
 use Overthink\DbSnapshot\Contracts\Driver;
+use Overthink\DbSnapshot\Contracts\FollowsRelations;
 use Overthink\DbSnapshot\Profile\AnonymizeStrategy;
 use Overthink\DbSnapshot\Profile\Profile;
 use Overthink\DbSnapshot\Profile\TableMode;
@@ -34,16 +35,27 @@ final class Puller
     ) {}
 
     /**
+     * Columns of every source table, read once per pull and only when needed.
+     *
+     * @var array<string, list<ColumnInfo>>|null
+     */
+    private ?array $columns = null;
+
+    /**
      * @param  (Closure(string, ProcessResult, float): void)|null  $onFinished
      * @param  (Closure(list<string>, string): void)|null  $onTick  receives running keys and the snapshot directory
      * @param  bool  $partial  only the profile's tables, without views and routines (see snapshot:refresh-table)
      * @param  bool  $addon  a partial snapshot kept as an add-on named after the profile
+     * @param  ?list<string>  $only  dump only these tables; the profile's other rules still decide what followers copy
      */
-    public function pull(Profile $profile, int $parallel, ?Closure $onFinished = null, ?Closure $onTick = null, bool $partial = false, bool $addon = false): Snapshot
+    public function pull(Profile $profile, int $parallel, ?Closure $onFinished = null, ?Closure $onTick = null, bool $partial = false, bool $addon = false, ?array $only = null): Snapshot
     {
-        $partial = $partial || $addon;
+        $partial = $partial || $addon || $only !== null;
+        $this->columns = null;
         $now = CarbonImmutable::now();
-        $tables = $this->analyzer->tables();
+        $allTables = $this->analyzer->tables();
+        $tables = $only === null ? $allTables : array_intersect_key($allTables, array_flip($only));
+        $this->checkFollowRules($profile, $tables, $allTables);
         $name = $now->format('Y-m-d_His').'_'.$profile->name;
         $directory = rtrim($this->basePath, '/').'/'.$name.'.partial';
 
@@ -68,11 +80,7 @@ final class Puller
                 continue;
             }
 
-            $where = match ($rule->mode) {
-                TableMode::Recent => $this->driver->recentCondition((string) $rule->column, $rule->sinceDate($now)),
-                TableMode::Where => $rule->where,
-                default => null,
-            };
+            $where = $rule->mode === TableMode::Schema ? null : $this->condition($profile, $table->name, $now);
 
             $file = $directory.'/'.Snapshot::TABLES_DIRECTORY."/{$table->name}.sql.gz";
             $jobs[$table->name] = $this->job($rule->anonymize !== [] && $anonymizer !== null
@@ -146,6 +154,105 @@ final class Puller
     }
 
     /**
+     * SQL condition for the rows $table copies, or null for all of them.
+     * A follower takes the rows pointing at what its parent copies, so the
+     * conditions nest along the chain (order_serials → order_items → orders).
+     */
+    private function condition(Profile $profile, string $table, CarbonImmutable $now): ?string
+    {
+        $rule = $profile->ruleFor($table);
+
+        if ($rule->mode !== TableMode::Follow) {
+            return match ($rule->mode) {
+                TableMode::Recent => $this->driver->recentCondition((string) $rule->column, $rule->sinceDate($now)),
+                TableMode::Where => $rule->where,
+                TableMode::Schema, TableMode::Skip => '1 = 0',
+                default => null,
+            };
+        }
+
+        $parentWhere = $this->condition($profile, (string) $rule->parent, $now);
+
+        if ($parentWhere === null || $parentWhere === '1 = 0') {
+            return $parentWhere;
+        }
+
+        if (! $this->driver instanceof FollowsRelations) {
+            throw new RuntimeException("The {$this->driver->name()} driver can't follow relations.");
+        }
+
+        return $this->driver->followCondition((string) $rule->column, (string) $rule->parent, $rule->referencedColumn(), $parentWhere);
+    }
+
+    /**
+     * Why $table.$column can't follow $parent.$references (a missing column,
+     * or types that can't be compared without a cast), or null when it can
+     * or the driver doesn't list columns.
+     */
+    private function followColumnsError(string $table, string $column, string $parent, string $references): ?string
+    {
+        if (! $this->driver instanceof AnonymizesColumns) {
+            return null;
+        }
+
+        $this->columns ??= $this->driver->columns();
+        $find = fn (string $table, string $name): ?ColumnInfo => current(array_filter($this->columns[$table] ?? [], fn (ColumnInfo $info): bool => $info->name === $name)) ?: null;
+        [$child, $referenced] = [$find($table, $column), $find($parent, $references)];
+
+        $missing = array_filter([
+            ($this->columns[$table] ?? []) !== [] && $child === null ? "{$table}.{$column}" : null,
+            ($this->columns[$parent] ?? []) !== [] && $referenced === null ? "{$parent}.{$references}" : null,
+        ]);
+
+        return match (true) {
+            $missing !== [] => implode(' and ', $missing).(count($missing) > 1 ? ' do' : ' does').' not exist',
+            $child !== null && $referenced !== null && ! $child->isComparableWith($referenced) => "{$table}.{$column} ({$child->type}) can't be compared with {$parent}.{$references} ({$referenced->type})",
+            default => null,
+        };
+    }
+
+    /**
+     * Fails before anything is dumped when a follower can't be resolved.
+     *
+     * @param  array<string, TableInfo>  $tables  the tables being dumped
+     * @param  array<string, TableInfo>  $allTables
+     */
+    private function checkFollowRules(Profile $profile, array $tables, array $allTables): void
+    {
+        $errors = [];
+
+        foreach ($tables as $name => $table) {
+            if ($profile->ruleFor($name)->mode !== TableMode::Follow) {
+                continue;
+            }
+
+            if (! $this->driver instanceof FollowsRelations) {
+                throw new RuntimeException("The {$this->driver->name()} driver can't follow relations, but profile [{$profile->name}] has {$name} follow another table.");
+            }
+
+            $child = $name;
+
+            foreach ($profile->followChain($name) as $parent) {
+                if (! isset($allTables[$parent])) {
+                    $errors[] = "{$child} follows {$parent}, which doesn't exist";
+
+                    break;
+                }
+
+                $rule = $profile->ruleFor($child);
+                $errors[] = $this->followColumnsError($child, (string) $rule->column, $parent, $rule->referencedColumn());
+                $child = $parent;
+            }
+        }
+
+        $errors = array_filter($errors);
+
+        if ($errors !== []) {
+            throw new RuntimeException("Profile [{$profile->name}] can't be pulled:\n  ".implode("\n  ", array_unique($errors)));
+        }
+    }
+
+    /**
      * Snapshots hold production data, so the directory never ends up in a
      * commit, even when it lives inside the project (the default).
      */
@@ -186,7 +293,7 @@ final class Puller
         }
 
         $driver = $this->driver;
-        $columns = $driver->columns();
+        $columns = $this->columns ??= $driver->columns();
         $salt = $this->anonymizeSalt ?: bin2hex(random_bytes(16));
         $errors = [];
 

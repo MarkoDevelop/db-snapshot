@@ -8,6 +8,7 @@ use Overthink\DbSnapshot\Analysis\TableInfo;
 use Overthink\DbSnapshot\Profile\AnonymizeStrategy;
 use Overthink\DbSnapshot\Profile\ColumnRule;
 use Overthink\DbSnapshot\Profile\Profile;
+use Overthink\DbSnapshot\Profile\TableMode;
 use Overthink\DbSnapshot\Profile\TableRule;
 
 const STALE_QUESTION = 'The analysis of the remote database is from 2 months ago. Refresh it?';
@@ -17,6 +18,8 @@ function prepareStalePull(string $workspace): void
     Sleep::fake();
     Process::preventStrayProcesses();
     Process::fake([
+        '*KEY_COLUMN_USAGE*' => Process::result(''),
+        '*SELECT DISTINCT TABLE_NAME, COLUMN_NAME*' => Process::result(''),
         '*information_schema.TABLES*' => Process::result("orders\tBASE TABLE\t10\t1000\t0"),
         '*information_schema.COLUMNS*' => Process::result(''),
         '*mysqldump*' => Process::result(),
@@ -108,5 +111,18 @@ it('says which tables are copied as they are when anonymization is off', functio
 
     $this->artisan('snapshot:pull')
         ->expectsOutputToContain('Anonymization is off (SNAPSHOT_ANONYMIZE), so these tables are copied as they are: orders')
+        ->assertSuccessful();
+});
+
+it('warns about followers of a table that copies no rows', function () {
+    prepareStalePull($this->workspace);
+    (new Analysis('production', now()->toImmutable(), []))->save($this->workspace.'/analysis.json');
+    (new Profile('default', TableMode::Full, [
+        'orders' => new TableRule(TableMode::Schema),
+        'order_items' => new TableRule(TableMode::Follow, 'order_id', parent: 'orders'),
+    ]))->save($this->workspace.'/profiles');
+
+    $this->artisan('snapshot:pull')
+        ->expectsOutputToContain('order_items follows orders, which copies no rows, so order_items stays empty.')
         ->assertSuccessful();
 });

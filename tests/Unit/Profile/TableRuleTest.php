@@ -31,3 +31,22 @@ it('rejects incomplete or unsafe rules', function (array $data) {
     'recent with a non-date since' => [['mode' => 'recent', 'column' => 'created_at', 'since' => "2025' OR 1=1"]],
     'where without clause' => [['mode' => 'where', 'where' => ' ']],
 ])->throws(InvalidArgumentException::class);
+
+it('saves a follow rule without the default referenced column', function () {
+    $rule = TableRule::fromArray(['mode' => 'follow', 'parent' => 'orders', 'column' => 'order_id']);
+
+    expect($rule->toArray())->toBe(['mode' => 'follow', 'parent' => 'orders', 'column' => 'order_id'])
+        ->and($rule->referencedColumn())->toBe('id')
+        ->and($rule->describe())->toBe('rows of copied orders by order_id')
+        ->and(TableRule::fromArray(['mode' => 'follow', 'parent' => 'orders', 'column' => 'order_number', 'references' => 'number'])->toArray())
+        ->toBe(['mode' => 'follow', 'parent' => 'orders', 'column' => 'order_number', 'references' => 'number']);
+});
+
+it('rejects follow rules without a safe parent and column', function (array $data) {
+    TableRule::fromArray(['mode' => 'follow', ...$data]);
+})->with([
+    'no parent' => [['column' => 'order_id']],
+    'no column' => [['parent' => 'orders']],
+    'injected parent' => [['parent' => 'orders WHERE 1', 'column' => 'order_id']],
+    'injected references' => [['parent' => 'orders', 'column' => 'order_id', 'references' => 'id) OR (1']],
+])->throws(InvalidArgumentException::class);

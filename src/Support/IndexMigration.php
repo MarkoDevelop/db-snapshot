@@ -9,13 +9,14 @@ use Overthink\DbSnapshot\Profile\Profile;
 use Overthink\DbSnapshot\Profile\TableMode;
 
 /**
- * A migration adding indexes to the date columns that "recent" rules filter
- * on, so the dump on the server doesn't have to scan whole tables.
+ * A migration adding indexes to the columns that rules filter on (the date
+ * column of "recent", the parent column of "follow"), so the dump on the
+ * server doesn't have to scan whole tables.
  */
 final class IndexMigration
 {
     /**
-     * Non-indexed date columns that $profile filters on.
+     * Non-indexed columns that $profile filters on.
      *
      * @return array<string, list<string>> table => columns
      */
@@ -28,6 +29,12 @@ final class IndexMigration
 
             if ($rule->mode === TableMode::Recent && $column !== null && ! $column->indexed) {
                 $missing[$table][] = $column->name;
+            }
+
+            $relation = $rule->mode === TableMode::Follow ? $analysis->table($table)?->relation((string) $rule->parent, (string) $rule->column) : null;
+
+            if ($relation !== null && ! $relation->indexed) {
+                $missing[$table][] = $relation->column;
             }
         }
 
@@ -63,8 +70,8 @@ final class IndexMigration
         use Illuminate\Support\Facades\Schema;
 
         /**
-         * Indexes the date columns that db-snapshot profiles filter on, so
-         * snapshot:pull can read recent rows without scanning whole tables.
+         * Indexes the columns that db-snapshot profiles filter on, so
+         * snapshot:pull can read their rows without scanning whole tables.
          *
          * On large tables building an index takes a while; check how your
          * database builds indexes on busy tables before deploying.
@@ -90,7 +97,7 @@ final class IndexMigration
      */
     public static function write(string $directory, array $indexes, ?CarbonImmutable $now = null): string
     {
-        $path = rtrim($directory, '/').'/'.($now ?? CarbonImmutable::now())->format('Y_m_d_His').'_add_snapshot_date_indexes.php';
+        $path = rtrim($directory, '/').'/'.($now ?? CarbonImmutable::now())->format('Y_m_d_His').'_add_snapshot_indexes.php';
 
         File::ensureDirectoryExists($directory);
         File::put($path, self::render($indexes));
