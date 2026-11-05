@@ -8,6 +8,7 @@ enum TableMode: string
     case Schema = 'schema';
     case Recent = 'recent';
     case Where = 'where';
+    case Follow = 'follow';
     case Skip = 'skip';
 
     public function label(): string
@@ -17,6 +18,7 @@ enum TableMode: string
             self::Schema => 'Schema only — no rows',
             self::Recent => 'Recent — rows newer than a date',
             self::Where => 'Custom WHERE clause',
+            self::Follow => 'Follow — rows belonging to the copied rows of another table',
             self::Skip => 'Skip — not even the table',
         };
     }

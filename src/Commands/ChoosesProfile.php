@@ -11,6 +11,7 @@ use Throwable;
 use function Laravel\Prompts\search;
 use function Laravel\Prompts\select;
 use function Laravel\Prompts\text;
+use function Laravel\Prompts\warning;
 
 /**
  * One way to pick a profile in every command: the one given, or, when
@@ -18,6 +19,16 @@ use function Laravel\Prompts\text;
  */
 trait ChoosesProfile
 {
+    /**
+     * @param  ?list<string>  $tables  only these followers
+     */
+    protected function warnAboutEmptyFollowers(Profile $profile, ?array $tables = null): void
+    {
+        foreach ($profile->emptyFollowers($tables) as $follower => $root) {
+            warning("{$follower} follows {$root}, which copies no rows, so {$follower} stays empty.");
+        }
+    }
+
     private static string $newProfile = "\0new";
 
     private static string $copyProfile = "\0copy";

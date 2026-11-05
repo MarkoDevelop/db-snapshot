@@ -2,6 +2,12 @@
 
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Process;
+use Overthink\DbSnapshot\Analysis\Analysis;
+use Overthink\DbSnapshot\Analysis\Relation;
+use Overthink\DbSnapshot\Analysis\TableInfo;
+use Overthink\DbSnapshot\Profile\Profile;
+use Overthink\DbSnapshot\Profile\TableMode;
+use Overthink\DbSnapshot\Profile\TableRule;
 use Overthink\DbSnapshot\Snapshot\SnapshotRepository;
 
 it('pulls only the given tables with their profile rules and replaces only them', function () {
@@ -210,4 +216,106 @@ it('needs an add-on name for a bare --save when not interactive', function () {
         ->assertFailed();
 
     Process::assertNothingRan();
+});
+
+function prepareFollowingRefresh(string $workspace): void
+{
+    prepareRefresh($workspace);
+
+    (new Analysis('production', now()->toImmutable(), [
+        'orders' => new TableInfo('orders', false, 10, 1000, 0, relations: [new Relation('last_event_id', 'event_logs')]),
+        'event_logs' => new TableInfo('event_logs', false, 10, 1000, 0, relations: [new Relation('order_id', 'orders')]),
+        'users' => new TableInfo('users', false, 10, 1000, 0),
+    ]))->save($workspace.'/analysis.json');
+
+    (new Profile('default', TableMode::Full, [
+        'orders' => new TableRule(TableMode::Where, where: 'id > 5'),
+        'event_logs' => new TableRule(TableMode::Follow, 'order_id', parent: 'orders'),
+    ]))->save($workspace.'/profiles');
+}
+
+it('offers to refresh the tables following the picked ones', function () {
+    prepareFollowingRefresh($this->workspace);
+
+    $this->artisan('snapshot:refresh-table', ['tables' => ['orders'], '--force' => true])
+        ->expectsConfirmation('Also refresh event_logs? They follow orders.', 'yes')
+        ->expectsOutputToContain('Refreshed orders, event_logs')
+        ->assertSuccessful();
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'tables/event_logs.sql.gz')
+        && str_contains(commandLine($process), '--where=`order_id` IN (SELECT `id` FROM (SELECT `id` FROM `production`.`orders` WHERE id > 5) AS `_orders`)'));
+});
+
+it('leaves followers alone without interaction, but says so', function () {
+    prepareFollowingRefresh($this->workspace);
+
+    $this->artisan('snapshot:refresh-table', ['tables' => ['orders'], '--force' => true, '--no-interaction' => true])
+        ->expectsOutputToContain('event_logs follow orders; name them too to refresh them.')
+        ->assertSuccessful();
+
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'tables/event_logs.sql.gz'));
+});
+
+it('refreshes a follower alone with the rows its parent rule picks', function () {
+    prepareFollowingRefresh($this->workspace);
+
+    $this->artisan('snapshot:refresh-table', ['tables' => ['event_logs'], '--force' => true])->assertSuccessful();
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'tables/event_logs.sql.gz')
+        && str_contains(commandLine($process), 'WHERE id > 5)'));
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'tables/orders.sql.gz'));
+});
+
+it('offers followers of searched tables and keeps their profile rules', function () {
+    prepareFollowingRefresh($this->workspace);
+
+    $this->artisan('snapshot:refresh-table')
+        ->expectsQuestion('Tables to refresh (type to search)', 'orders')
+        ->expectsChoice('Tables to refresh (type to search)', ['orders'], ['orders' => 'orders · 1000 B · ~10 rows · now: where id > 5'])
+        ->expectsConfirmation('Also refresh event_logs? They follow orders.', 'yes')
+        ->expectsChoice('orders (1000 B, ~10 rows)', 'where', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
+        ->expectsQuestion('WHERE clause for orders', 'id > 7')
+        ->expectsConfirmation('Also save these tables as an add-on, to apply on top of later restores?', 'no')
+        ->expectsConfirmation('Replace orders, event_logs in dev_app?', 'yes')
+        ->assertSuccessful();
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'tables/event_logs.sql.gz') && str_contains(commandLine($process), 'WHERE id > 7)'));
+});
+
+it('saves followers into an add-on with their parent', function () {
+    prepareFollowingRefresh($this->workspace);
+
+    $this->artisan('snapshot:refresh-table', ['tables' => ['orders'], '--save' => 'orders', '--force' => true])
+        ->expectsConfirmation('Also refresh event_logs? They follow orders.', 'yes')
+        ->expectsOutputToContain('Saved to add-on orders (event_logs, orders)')
+        ->assertSuccessful();
+
+    expect(app(SnapshotRepository::class)->findAddon('orders')->manifest['tables']['event_logs']['mode'])->toBe('follow');
+});
+
+it('does not offer Follow when the profile already has the other table follow this one', function () {
+    prepareFollowingRefresh($this->workspace);
+
+    $this->artisan('snapshot:refresh-table')
+        ->expectsQuestion('Tables to refresh (type to search)', 'orders')
+        ->expectsChoice('Tables to refresh (type to search)', ['orders'], ['orders' => 'orders · 1000 B · ~10 rows · now: where id > 5'])
+        ->expectsConfirmation('Also refresh event_logs? They follow orders.', 'no')
+        ->expectsChoice('orders (1000 B, ~10 rows)', 'full', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
+        ->expectsConfirmation('Also save these tables as an add-on, to apply on top of later restores?', 'no')
+        ->expectsConfirmation('Replace orders in dev_app?', 'yes')
+        ->assertSuccessful();
+});
+
+it('lets a picked table follow another one for this run', function () {
+    prepareFollowingRefresh($this->workspace);
+
+    $this->artisan('snapshot:refresh-table')
+        ->expectsQuestion('Tables to refresh (type to search)', 'event_logs')
+        ->expectsChoice('Tables to refresh (type to search)', ['event_logs'], ['event_logs' => 'event_logs · 1000 B · ~10 rows · now: rows of copied orders by order_id'])
+        ->expectsChoice('event_logs (1000 B, ~10 rows)', 'follow', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Follow, TableMode::Skip]))
+        ->expectsConfirmation('Also save these tables as an add-on, to apply on top of later restores?', 'no')
+        ->expectsConfirmation('Replace event_logs in dev_app?', 'yes')
+        ->assertSuccessful();
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'tables/event_logs.sql.gz') && str_contains(commandLine($process), 'WHERE id > 5)'));
 });

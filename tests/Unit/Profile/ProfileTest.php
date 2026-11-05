@@ -65,3 +65,42 @@ it('lists personal looking columns the profile has not decided on', function () 
 
     expect(array_keys($profile->undecidedPersonalData($analysis)))->toBe(['orders.customer_phone']);
 });
+
+function followingProfile(array $extra = []): Profile
+{
+    return new Profile('default', TableMode::Full, [
+        'orders' => new TableRule(TableMode::Recent, 'created_at', months: 3),
+        'order_items' => new TableRule(TableMode::Follow, 'order_id', parent: 'orders'),
+        'order_serials' => new TableRule(TableMode::Follow, 'order_item_id', parent: 'order_items'),
+        'shipments' => new TableRule(TableMode::Follow, 'order_id', parent: 'orders'),
+        ...$extra,
+    ]);
+}
+
+it('finds the tables following a table, also through other followers', function () {
+    $profile = followingProfile();
+
+    expect($profile->followers('orders'))->toBe(['order_items', 'order_serials', 'shipments'])
+        ->and($profile->followers('order_items'))->toBe(['order_serials'])
+        ->and($profile->followChain('order_serials'))->toBe(['order_items', 'orders']);
+});
+
+it('rejects follow rules that go in a circle', function () {
+    followingProfile(['orders' => new TableRule(TableMode::Follow, 'last_serial_id', parent: 'order_serials')]);
+})->throws(InvalidArgumentException::class, '"follow" rules go in a circle: orders → order_serials → order_items → orders.');
+
+it('rejects a table following itself', function () {
+    new Profile('default', TableMode::Full, ['categories' => new TableRule(TableMode::Follow, 'parent_id', parent: 'categories')]);
+})->throws(InvalidArgumentException::class, 'categories → categories');
+
+it('finds followers whose chain starts at a table copying no rows', function () {
+    $profile = new Profile('default', TableMode::Skip, [
+        'order_items' => new TableRule(TableMode::Follow, 'order_id', parent: 'orders'),
+        'order_serials' => new TableRule(TableMode::Follow, 'order_item_id', parent: 'order_items'),
+        'invoices' => new TableRule(TableMode::Full),
+        'invoice_lines' => new TableRule(TableMode::Follow, 'invoice_id', parent: 'invoices'),
+    ]);
+
+    expect($profile->emptyFollowers())->toBe(['order_items' => 'orders', 'order_serials' => 'orders'])
+        ->and($profile->emptyFollowers(['order_serials', 'invoice_lines']))->toBe(['order_serials' => 'orders']);
+});

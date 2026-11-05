@@ -15,6 +15,8 @@ function fakeRemoteTables(array $dumpResults = []): void
     Sleep::fake();
     Process::preventStrayProcesses();
     Process::fake([
+        '*KEY_COLUMN_USAGE*' => Process::result(''),
+        '*SELECT DISTINCT TABLE_NAME, COLUMN_NAME*' => Process::result(''),
         '*information_schema.TABLES*' => Process::result(implode("\n", [
             "event_logs\tBASE TABLE\t100\t5000\t0",
             "activities\tBASE TABLE\t100\t4000\t0",
@@ -88,6 +90,8 @@ it('throws with the failing tables and keeps nothing when a dump fails', functio
 it('never runs more dumps at once than allowed', function () {
     Sleep::fake();
     Process::fake([
+        '*KEY_COLUMN_USAGE*' => Process::result(''),
+        '*SELECT DISTINCT TABLE_NAME, COLUMN_NAME*' => Process::result(''),
         '*information_schema.TABLES*' => Process::result(implode("\n", array_map(fn (int $i) => "t{$i}\tBASE TABLE\t1\t1\t0", range(1, 6)))),
         '*mysqldump*' => Process::describe()->iterations(3),
     ]);
@@ -213,4 +217,125 @@ it('dumps post-data per table for add-ons, so merges can move it with its table'
         ->and($addon->isPartial())->toBeTrue();
     Process::assertRan(fn ($process) => commandLine($process) === "fake-post-data orders > {$addon->path}.partial/post-data/orders.sql.gz");
     Process::assertNotRan(fn ($process) => str_contains(commandLine($process), '_post-data.sql.gz'));
+});
+
+function fakeOrderTables(): void
+{
+    Sleep::fake();
+    Process::preventStrayProcesses();
+    Process::fake([
+        '*information_schema.TABLES*' => Process::result(implode("\n", [
+            "orders\tBASE TABLE\t100\t2000\t0",
+            "order_items\tBASE TABLE\t100\t2000\t0",
+            "order_serials\tBASE TABLE\t100\t2000\t0",
+            "notes\tBASE TABLE\t100\t2000\t0",
+        ])),
+        '*IS_NULLABLE*' => Process::result(implode("\n", [
+            "orders\tid\tint\tNULL\t\tPRI\tNO",
+            "orders\tnumber\tvarchar\t20\t\t\tNO",
+            "order_items\tid\tint\tNULL\t\tPRI\tNO",
+            "order_items\torder_id\tint\tNULL\t\t\tNO",
+            "order_items\torder_number\tvarchar\t20\t\t\tNO",
+            "order_serials\torder_item_id\tint\tNULL\t\t\tNO",
+        ])),
+        '*mysqldump*' => Process::result(),
+    ]);
+}
+
+function orderProfile(TableRule $orders): Profile
+{
+    return new Profile('default', TableMode::Full, [
+        'orders' => $orders,
+        'order_items' => new TableRule(TableMode::Follow, 'order_id', parent: 'orders'),
+        'order_serials' => new TableRule(TableMode::Follow, 'order_item_id', parent: 'order_items'),
+    ]);
+}
+
+it('copies only the rows of followers that belong to copied rows, along the whole chain', function () {
+    $this->travelTo('2026-10-08 12:00:00');
+    fakeOrderTables();
+
+    $snapshot = app(Puller::class)->pull(orderProfile(new TableRule(TableMode::Recent, 'created_at', months: 3)), 2);
+
+    $orders = "`created_at` >= '2026-07-08 00:00:00'";
+    $items = "`order_id` IN (SELECT `id` FROM (SELECT `id` FROM `production`.`orders` WHERE {$orders}) AS `_orders`)";
+
+    expect($snapshot->manifest['tables']['order_items']['where'])->toBe($items)
+        ->and($snapshot->manifest['tables']['order_serials']['where'])->toBe("`order_item_id` IN (SELECT `id` FROM (SELECT `id` FROM `production`.`order_items` WHERE {$items}) AS `_order_items`)")
+        ->and($snapshot->manifest['tables']['order_items']['mode'])->toBe('follow');
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'tables/order_items.sql.gz') && str_contains(commandLine($process), '--where=`order_id` IN (SELECT `id` FROM (SELECT `id` FROM `production`.`orders` WHERE `created_at` >= '));
+});
+
+it('copies followers of a full parent in full and of an empty parent not at all', function (TableRule $orders, ?string $where) {
+    fakeOrderTables();
+
+    $snapshot = app(Puller::class)->pull(orderProfile($orders), 2);
+
+    expect($snapshot->manifest['tables']['order_items']['where'])->toBe($where)
+        ->and($snapshot->manifest['tables']['order_serials']['where'])->toBe($where);
+})->with([
+    'full' => [new TableRule(TableMode::Full), null],
+    'schema' => [new TableRule(TableMode::Schema), '1 = 0'],
+    'skip' => [new TableRule(TableMode::Skip), '1 = 0'],
+]);
+
+it('dumps only the given tables but still follows the rules of the others', function () {
+    fakeOrderTables();
+
+    $snapshot = app(Puller::class)->pull(orderProfile(new TableRule(TableMode::Where, where: 'id > 5')), 2, only: ['order_items']);
+
+    expect($snapshot->isPartial())->toBeTrue()
+        ->and(array_keys($snapshot->manifest['tables']))->toBe(['order_items'])
+        ->and($snapshot->manifest['tables']['order_items']['where'])->toBe('`order_id` IN (SELECT `id` FROM (SELECT `id` FROM `production`.`orders` WHERE id > 5) AS `_orders`)');
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'tables/orders.sql.gz'));
+});
+
+it('pulls nothing when a follower points at a table that does not exist', function () {
+    fakeOrderTables();
+
+    expect(fn () => app(Puller::class)->pull(new Profile('default', TableMode::Full, [
+        'notes' => new TableRule(TableMode::Follow, 'invoice_id', parent: 'invoices'),
+    ]), 2))->toThrow(RuntimeException::class, 'notes follows invoices, which doesn\'t exist');
+
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'mysqldump'));
+});
+
+it('refuses to follow with a driver that cannot', function () {
+    Process::fake();
+    DbSnapshot::extend('fake', fn () => new FakeDriver);
+    config()->set('db-snapshot.driver', 'fake');
+
+    app(Puller::class)->pull(new Profile('default', TableMode::Full, [
+        'orders' => new TableRule(TableMode::Follow, 'user_id', parent: 'users'),
+    ]), 1);
+})->throws(RuntimeException::class, "The fake driver can't follow relations");
+
+it('follows a parent column other than id', function () {
+    fakeOrderTables();
+
+    $snapshot = app(Puller::class)->pull(new Profile('default', TableMode::Full, [
+        'orders' => new TableRule(TableMode::Where, where: 'id > 5'),
+        'order_items' => new TableRule(TableMode::Follow, 'order_number', parent: 'orders', references: 'number'),
+    ]), 2);
+
+    expect($snapshot->manifest['tables']['order_items']['where'])
+        ->toBe('`order_number` IN (SELECT `number` FROM (SELECT `number` FROM `production`.`orders` WHERE id > 5) AS `_orders`)');
+});
+
+it('pulls nothing when a follow rule names a column that does not exist', function () {
+    fakeOrderTables();
+
+    expect(fn () => app(Puller::class)->pull(new Profile('default', TableMode::Full, [
+        'order_items' => new TableRule(TableMode::Follow, 'orderid', parent: 'orders', references: 'uuid'),
+    ]), 2))->toThrow(RuntimeException::class, 'order_items.orderid and orders.uuid do not exist');
+
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'mysqldump'));
+});
+
+it('pulls nothing when a follow rule compares columns of different types', function () {
+    fakeOrderTables();
+
+    expect(fn () => app(Puller::class)->pull(new Profile('default', TableMode::Full, [
+        'order_items' => new TableRule(TableMode::Follow, 'order_number', parent: 'orders'),
+    ]), 2))->toThrow(RuntimeException::class, "order_items.order_number (varchar) can't be compared with orders.id (int)");
 });

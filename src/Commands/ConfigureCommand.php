@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\File;
 use Overthink\DbSnapshot\Analysis\Analysis;
 use Overthink\DbSnapshot\Analysis\Analyzer;
 use Overthink\DbSnapshot\Analysis\ColumnInfo;
+use Overthink\DbSnapshot\Analysis\Relation;
 use Overthink\DbSnapshot\Analysis\TableInfo;
 use Overthink\DbSnapshot\Profile\AnonymizeStrategy;
 use Overthink\DbSnapshot\Profile\ColumnRule;
@@ -71,6 +72,10 @@ class ConfigureCommand extends Command
         }
 
         $rules = $this->existingRules($existing, $analysis);
+
+        if ($analysis->tables !== [] && array_filter($analysis->tables, fn (TableInfo $table): bool => $table->relations !== []) === []) {
+            note('The analysis knows no relations between tables, so "follow" isn\'t offered. If it predates them, run snapshot:analyze.');
+        }
         $largeMb = (int) config('db-snapshot.large_table_mb');
         $baseTables = array_filter($analysis->tables, fn (TableInfo $table): bool => ! $table->isView);
 
@@ -102,8 +107,10 @@ class ConfigureCommand extends Command
         $newRules = [];
 
         foreach ($selected as $tableName) {
-            $newRules[$tableName] = $this->askRule($analysis->tables[$tableName], $rules[$tableName] ?? null);
+            $newRules[$tableName] = $this->askRule($analysis->tables[$tableName], $rules[$tableName] ?? null, $newRules);
         }
+
+        $newRules = $this->suggestFollowers($analysis, $newRules);
 
         $notPersonal = $existing->notPersonal;
         $newRules = config('db-snapshot.anonymize.enabled')
@@ -124,6 +131,83 @@ class ConfigureCommand extends Command
         $this->offerIndexMigration($profile, $analysis);
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Offer tables pointing at filtered tables to follow them, so orders
+     * come with their items. Repeats for the followers' own children.
+     *
+     * @param  array<string, TableRule>  $rules
+     * @return array<string, TableRule>
+     */
+    private function suggestFollowers(Analysis $analysis, array $rules): array
+    {
+        $offered = [];
+
+        do {
+            $filtered = array_keys(array_filter($rules, fn (TableRule $rule): bool => in_array($rule->mode, [TableMode::Recent, TableMode::Where, TableMode::Follow], true)));
+            $candidates = [];
+
+            foreach ($analysis->tables as $name => $table) {
+                if ($table->isView || isset($rules[$name]) || isset($offered[$name])) {
+                    continue;
+                }
+
+                $relations = array_values(array_filter(
+                    $this->followableRelations($table, null, $rules),
+                    fn (Relation $relation): bool => in_array($relation->parent, $filtered, true),
+                ));
+
+                // Date-filtered chains first: that's what following is mostly for.
+                usort($relations, fn (Relation $a, Relation $b): int => $this->isRecentChain($b->parent, $rules) <=> $this->isRecentChain($a->parent, $rules));
+
+                if ($relations !== []) {
+                    $candidates[$name] = $relations[0];
+                }
+            }
+
+            if ($candidates === []) {
+                break;
+            }
+
+            $offered += $candidates;
+
+            $picked = multiselect(
+                label: 'These tables point at tables you filter. Copy only their rows that belong to copied rows?',
+                options: array_combine(array_keys($candidates), array_map(
+                    fn (string $name, Relation $relation): string => "{$name} · {$this->formatBytes($analysis->tables[$name]->bytes())} → {$relation->describe()}"
+                        .($relation->indexed ? '' : ", {$relation->column} not indexed"),
+                    array_keys($candidates),
+                    $candidates,
+                )),
+                default: array_keys($candidates),
+                scroll: 15,
+                hint: 'Unchecked tables keep their rule (copied in full by default).',
+            );
+
+            foreach ($picked as $name) {
+                $rules[$name] = $this->followRule($candidates[$name]);
+            }
+        } while ($picked !== []);
+
+        return $rules;
+    }
+
+    /**
+     * Whether $table's rule, or the rule its follow chain ends at, is "recent".
+     *
+     * @param  array<string, TableRule>  $rules
+     */
+    private function isRecentChain(string $table, array $rules): bool
+    {
+        $seen = [];
+
+        while (($rules[$table] ?? null)?->mode === TableMode::Follow && ! isset($seen[$table])) {
+            $seen[$table] = true;
+            $table = (string) $rules[$table]->parent;
+        }
+
+        return ($rules[$table] ?? null)?->mode === TableMode::Recent;
     }
 
     /**
@@ -317,7 +401,7 @@ class ConfigureCommand extends Command
             return;
         }
 
-        warning("These date columns have no index, so pulling recent rows scans the whole table on the server:\n  "
+        warning("These columns have no index, so pulling filtered rows scans the whole table on the server:\n  "
             .implode("\n  ", array_map(
                 fn (string $table, array $columns): string => $table.'.'.implode(', '.$table.'.', $columns)
                     .' ('.$this->formatBytes((int) $analysis->table($table)?->bytes()).')',
@@ -346,6 +430,28 @@ class ConfigureCommand extends Command
         return array_intersect_key($profile->tables, $analysis->tables);
     }
 
+    /**
+     * Rough share of $table's rows the profile copies, or null when unknown.
+     * A follower is guessed to keep the same share as its parent.
+     */
+    private function share(Analysis $analysis, Profile $profile, string $table): ?float
+    {
+        $rule = $profile->ruleFor($table);
+
+        if ($rule->mode === TableMode::Follow) {
+            return $this->share($analysis, $profile, (string) $rule->parent);
+        }
+
+        $info = $analysis->table($table);
+        $estimate = $info !== null ? $this->estimate($info, $rule) : null;
+
+        return match (true) {
+            $estimate === null => null,
+            $info->bytes() === 0 => $rule->mode === TableMode::Schema || $rule->mode === TableMode::Skip ? 0.0 : 1.0,
+            default => $estimate / $info->bytes(),
+        };
+    }
+
     private function summary(Analysis $analysis, Profile $profile): void
     {
         $before = 0;
@@ -355,7 +461,8 @@ class ConfigureCommand extends Command
         foreach ($analysis->tables as $table) {
             $before += $table->bytes();
             $rule = $profile->ruleFor($table->name);
-            $estimate = $this->estimate($table, $rule);
+            $share = $this->share($analysis, $profile, $table->name);
+            $estimate = $share !== null ? $table->bytes() * $share : null;
             $after += $estimate ?? $table->bytes();
 
             if ($rule->mode !== TableMode::Full || $rule->anonymize !== []) {

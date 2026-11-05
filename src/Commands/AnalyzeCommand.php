@@ -22,7 +22,7 @@ class AnalyzeCommand extends Command
 
     protected $signature = 'snapshot:analyze {--top=25 : How many of the largest tables to show}';
 
-    protected $description = 'Read table sizes and date columns of the remote database (read-only)';
+    protected $description = 'Read table sizes, date columns and relations of the remote database (read-only)';
 
     public function handle(Analyzer $analyzer): int
     {

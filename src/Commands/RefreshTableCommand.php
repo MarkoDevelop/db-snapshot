@@ -204,6 +204,16 @@ class RefreshTableCommand extends Command
             return self::FAILURE;
         }
 
+        $followers = $this->followersOf($profile, $names, $tables);
+
+        if ($followers !== [] && $this->input->isInteractive()
+            && confirm('Also refresh '.implode(', ', $followers).'? They follow '.implode(', ', $names).'.', default: true)) {
+            $names = [...$names, ...$followers];
+        } elseif ($followers !== []) {
+            note(implode(', ', $followers).' follow '.implode(', ', $names).'; name them too to refresh them.');
+            $followers = [];
+        }
+
         $rules = [];
 
         foreach ($names as $name) {
@@ -213,8 +223,8 @@ class RefreshTableCommand extends Command
                 $rule = new TableRule(TableMode::Full);
             }
 
-            $rules[$name] = $this->input->isInteractive() && $this->argument('tables') === []
-                ? $this->askRule($tables[$name], $rule)
+            $rules[$name] = $this->input->isInteractive() && $this->argument('tables') === [] && ! in_array($name, $followers, true)
+                ? $this->askRule($tables[$name], $rule, array_diff_key([...$profile->tables, ...$rules], [$name => true]))
                 : $rule;
 
             note("{$name}: {$rules[$name]->describe()}");
@@ -261,7 +271,18 @@ class RefreshTableCommand extends Command
         $warnings = [];
 
         try {
-            $snapshot = $puller->pull(new Profile($save ?? 'refresh', TableMode::Skip, $rules), $parallel, $report, partial: true, addon: $save !== null);
+            // The whole profile goes along, so followers see their parents' rules.
+            $pulled = new Profile($save ?? 'refresh', $profile->defaultMode, [...$profile->tables, ...$rules]);
+            $this->warnAboutEmptyFollowers($pulled, array_keys($rules));
+
+            $snapshot = $puller->pull(
+                $pulled,
+                $parallel,
+                $report,
+                partial: true,
+                addon: $save !== null,
+                only: array_keys($rules),
+            );
 
             // Merged right away, so the add-on is whole even if the local import fails.
             $saved = $save !== null ? $snapshots->mergeOlderAddons($snapshot) : null;
@@ -344,6 +365,29 @@ class RefreshTableCommand extends Command
         }
 
         return null;
+    }
+
+    /**
+     * Tables following any of $names (directly or through each other) that
+     * aren't picked already.
+     *
+     * @param  list<string>  $names
+     * @param  array<string, TableInfo>  $tables
+     * @return list<string>
+     */
+    private function followersOf(Profile $profile, array $names, array $tables): array
+    {
+        $followers = [];
+
+        foreach ($names as $name) {
+            foreach ($profile->followers($name) as $follower) {
+                if (isset($tables[$follower]) && ! in_array($follower, [...$names, ...$followers], true)) {
+                    $followers[] = $follower;
+                }
+            }
+        }
+
+        return $followers;
     }
 
     private function profile(): Profile

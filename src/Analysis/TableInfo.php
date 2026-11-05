@@ -12,6 +12,7 @@ final class TableInfo
      * @param  list<DateColumn>  $dateColumns
      * @param  list<ColumnInfo>  $columns  all columns, in table order (empty when the driver doesn't report them)
      * @param  array<string, ColumnRule>  $personalData  columns that look personal, with a suggested replacement
+     * @param  list<Relation>  $relations  columns pointing at other tables, foreign keys first
      */
     public function __construct(
         public readonly string $name,
@@ -22,7 +23,19 @@ final class TableInfo
         public readonly array $dateColumns = [],
         public readonly array $columns = [],
         public readonly array $personalData = [],
+        public readonly array $relations = [],
     ) {}
+
+    public function relation(string $parent, string $column): ?Relation
+    {
+        foreach ($this->relations as $relation) {
+            if ($relation->parent === $parent && $relation->column === $column) {
+                return $relation;
+            }
+        }
+
+        return null;
+    }
 
     public function column(string $name): ?ColumnInfo
     {
@@ -91,7 +104,7 @@ final class TableInfo
     }
 
     /**
-     * @param  array{name: string, is_view: bool, rows: int, data_bytes: int, index_bytes: int, date_columns: list<array{name: string, type: string, indexed: bool, min?: ?string, max?: ?string}>, columns?: list<array{name: string, type: string, kind?: string, max_length?: ?int, generated?: bool, primary_key?: bool, nullable?: bool}>, personal_data?: array<string, string|array<string, string>>}  $data
+     * @param  array{name: string, is_view: bool, rows: int, data_bytes: int, index_bytes: int, date_columns: list<array{name: string, type: string, indexed: bool, min?: ?string, max?: ?string}>, columns?: list<array{name: string, type: string, kind?: string, max_length?: ?int, generated?: bool, primary_key?: bool, nullable?: bool}>, personal_data?: array<string, string|array<string, string>>, relations?: list<array{column: string, parent: string, references?: string, guessed?: bool, indexed?: bool}>}  $data
      */
     public static function fromArray(array $data): self
     {
@@ -104,11 +117,12 @@ final class TableInfo
             array_map(DateColumn::fromArray(...), $data['date_columns']),
             array_map(ColumnInfo::fromArray(...), $data['columns'] ?? []),
             array_map(ColumnRule::fromJson(...), $data['personal_data'] ?? []),
+            array_map(Relation::fromArray(...), $data['relations'] ?? []),
         );
     }
 
     /**
-     * @return array{name: string, is_view: bool, rows: int, data_bytes: int, index_bytes: int, date_columns: list<array{name: string, type: string, indexed: bool, min: ?string, max: ?string}>, columns: list<array{name: string, type: string, kind: string, max_length: ?int, generated: bool, primary_key: bool, nullable: bool}>, personal_data: object}
+     * @return array{name: string, is_view: bool, rows: int, data_bytes: int, index_bytes: int, date_columns: list<array{name: string, type: string, indexed: bool, min: ?string, max: ?string}>, columns: list<array{name: string, type: string, kind: string, max_length: ?int, generated: bool, primary_key: bool, nullable: bool}>, personal_data: object, relations: list<array{column: string, parent: string, references: string, guessed: bool, indexed: bool}>}
      */
     public function toArray(): array
     {
@@ -121,6 +135,7 @@ final class TableInfo
             'date_columns' => array_map(fn (DateColumn $column): array => $column->toArray(), $this->dateColumns),
             'columns' => array_map(fn (ColumnInfo $column): array => $column->toArray(), $this->columns),
             'personal_data' => (object) array_map(fn (ColumnRule $rule): string|array => $rule->toJson(), $this->personalData),
+            'relations' => array_map(fn (Relation $relation): array => $relation->toArray(), $this->relations),
         ];
     }
 }

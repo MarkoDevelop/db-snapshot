@@ -61,6 +61,8 @@ return [
     */
     'drivers' => [
         'mysql' => [
+            // Keep --single-transaction and --skip-lock-tables: "follow" rules
+            // read the parent table inside the dump, which fails under LOCK TABLES.
             'dump_options' => [
                 '--single-transaction',
                 '--quick',

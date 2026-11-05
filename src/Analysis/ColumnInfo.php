@@ -32,6 +32,29 @@ final class ColumnInfo
     }
 
     /**
+     * Whether comparing this column with $other (as a follow rule does) can
+     * use an index, rather than casting every row or failing outright.
+     */
+    public function isComparableWith(self $other): bool
+    {
+        return $this->family() === $other->family();
+    }
+
+    /**
+     * "text", "number", or the bare type name (uuid, binary, …).
+     */
+    private function family(): string
+    {
+        if ($this->isText()) {
+            return 'text';
+        }
+
+        $type = strtolower(trim((string) preg_replace('/\(.*$/', '', $this->type)));
+
+        return in_array($type, ['tinyint', 'smallint', 'mediumint', 'int', 'integer', 'bigint', 'decimal', 'numeric'], true) ? 'number' : $type;
+    }
+
+    /**
      * @param  array{name: string, type: string, kind?: string, max_length?: ?int, generated?: bool, primary_key?: bool, nullable?: bool}  $data
      */
     public static function fromArray(array $data): self

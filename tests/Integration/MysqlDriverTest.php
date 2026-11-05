@@ -2,6 +2,7 @@
 
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Process;
+use Overthink\DbSnapshot\Analysis\Analyzer;
 use Overthink\DbSnapshot\Profile\Profile;
 use Overthink\DbSnapshot\Profile\TableMode;
 use Overthink\DbSnapshot\Profile\TableRule;
@@ -134,4 +135,44 @@ it('keeps quotes, newlines and binary data intact in tables it does not anonymiz
     expect(myExec($this->my, 'snapshot_target', "SELECT HEX(notes) FROM orders WHERE number = 'SO-0001'"))->toBe(strtoupper(bin2hex("Leave at the \"door\"\nthanks")))
         ->and(myExec($this->my, 'snapshot_target', 'SELECT name FROM users WHERE id = 2'))->toBe("Bor O'Hara")
         ->and(myExec($this->my, 'snapshot_target', 'SELECT HEX(avatar) FROM users WHERE id = 1'))->toBe('00FF10');
+});
+
+it('follows foreign keys and guessed relations, also while anonymizing', function () {
+    myExec($this->my, 'snapshot_source', <<<'SQL'
+        CREATE TABLE order_items (
+            id int unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            order_id int unsigned NOT NULL,
+            sku varchar(20) NOT NULL,
+            CONSTRAINT order_items_order_id_foreign FOREIGN KEY (order_id) REFERENCES orders (id)
+        );
+        CREATE TABLE order_notes (id int unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY, order_item_id int unsigned NOT NULL, body varchar(191) NULL);
+        INSERT INTO order_items (order_id, sku) VALUES (1, 'old'), (2, 'new');
+        INSERT INTO order_notes (order_item_id, body) VALUES (1, 'old note'), (2, 'new note');
+        SQL);
+
+    $analysis = app(Analyzer::class)->analyze();
+    $relations = fn (string $table) => array_map(fn ($relation) => $relation->toArray(), $analysis->table($table)->relations);
+
+    expect($relations('order_items'))->toBe([['column' => 'order_id', 'parent' => 'orders', 'references' => 'id', 'guessed' => false, 'indexed' => true]])
+        ->and($relations('order_notes'))->toBe([['column' => 'order_item_id', 'parent' => 'order_items', 'references' => 'id', 'guessed' => true, 'indexed' => false]]);
+
+    $snapshot = app(Puller::class)->pull(new Profile('default', TableMode::Full, [
+        'users' => new TableRule(TableMode::Schema),
+        'orders' => new TableRule(TableMode::Recent, 'created_at', months: 1),
+        'order_items' => new TableRule(TableMode::Follow, 'order_id', parent: 'orders'),
+        'order_notes' => TableRule::fromArray(['mode' => 'follow', 'parent' => 'order_items', 'column' => 'order_item_id', 'anonymize' => ['body' => ['template' => 'Note {id}']]]),
+    ]), 2);
+
+    $warnings = app(Restorer::class)->restore($snapshot, [...$this->my, 'driver' => 'mysql', 'database' => 'snapshot_target'], 2);
+
+    expect($warnings)->toBe([])
+        ->and(myExec($this->my, 'snapshot_target', 'SELECT GROUP_CONCAT(sku) FROM order_items'))->toBe('new')
+        ->and(myExec($this->my, 'snapshot_target', 'SELECT GROUP_CONCAT(body) FROM order_notes'))->toBe('Note 2');
+
+    $limited = app(Puller::class)->pull(new Profile('limited', TableMode::Skip, [
+        'orders' => new TableRule(TableMode::Where, where: '1 ORDER BY id DESC LIMIT 1'),
+        'order_items' => new TableRule(TableMode::Follow, 'order_id', parent: 'orders'),
+    ]), 2);
+
+    expect(gzdecode(File::get($limited->path.'/tables/order_items.sql.gz')))->toContain("'new'")->not->toContain("'old'");
 });

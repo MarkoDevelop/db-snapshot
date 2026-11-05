@@ -2,6 +2,7 @@
 
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Process;
+use Overthink\DbSnapshot\Analysis\Analyzer;
 use Overthink\DbSnapshot\Profile\Profile;
 use Overthink\DbSnapshot\Profile\TableMode;
 use Overthink\DbSnapshot\Profile\TableRule;
@@ -170,4 +171,31 @@ it('replaces personal data on the server and keeps it consistent', function () {
     ]), 1, partial: true);
 
     expect(gzdecode(File::get($again->path.'/tables/users.sql.gz')))->toContain(explode('|', explode("\n", $rows)[0])[1]);
+});
+
+it('follows foreign keys, keeping the constraints valid', function () {
+    $analysis = app(Analyzer::class)->analyze();
+
+    expect(array_map(fn ($relation) => $relation->toArray(), $analysis->table('order_items')->relations))
+        ->toBe([['column' => 'order_id', 'parent' => 'orders', 'references' => 'id', 'guessed' => false, 'indexed' => false]]);
+
+    $snapshot = app(Puller::class)->pull(new Profile('default', TableMode::Full, [
+        'users' => new TableRule(TableMode::Full),
+        'orders' => new TableRule(TableMode::Recent, 'created_at', months: 1),
+        'order_items' => new TableRule(TableMode::Follow, 'order_id', parent: 'orders'),
+    ]), 2);
+
+    $warnings = app(Restorer::class)->restore($snapshot, [...$this->pg, 'driver' => 'pgsql', 'database' => 'snapshot_target'], 2);
+
+    expect($warnings)->toBe([])
+        ->and(pgExec($this->pg, 'snapshot_target', "SELECT string_agg(sku, ',' ORDER BY sku) FROM order_items"))->toBe('new-a,new-b')
+        ->and(pgExec($this->pg, 'snapshot_target', "SELECT count(*) FROM pg_constraint WHERE contype = 'f' AND conrelid = 'order_items'::regclass"))->toBe('1');
+
+    config()->set('db-snapshot.anonymize.salt', 'pepper');
+    $limited = app(Puller::class)->pull(new Profile('limited', TableMode::Skip, [
+        'orders' => new TableRule(TableMode::Where, where: 'true ORDER BY id DESC LIMIT 1'),
+        'order_items' => TableRule::fromArray(['mode' => 'follow', 'parent' => 'orders', 'column' => 'order_id', 'anonymize' => ['sku' => ['template' => 'Item {id}']]]),
+    ]), 2);
+
+    expect(gzdecode(File::get($limited->path.'/tables/order_items.sql.gz')))->toContain('Item 3')->not->toContain('Item 2')->not->toContain('new-b');
 });

@@ -119,3 +119,8 @@ it('copies anonymized tables with an explicit column list', function () {
         ->toContain('-- psql COPY (SELECT "id", (\'x\')::text AS "email" FROM "public"."users") TO STDOUT')
         ->not->toContain('"search"');
 });
+
+it('follows the parent inside its schema', function () {
+    expect(pgsqlDriver('shop')->followCondition('order_id', 'orders', 'id', "\"created_at\" >= '2026-01-01 00:00:00'"))
+        ->toBe("\"order_id\" IN (SELECT \"id\" FROM \"shop\".\"orders\" WHERE \"created_at\" >= '2026-01-01 00:00:00')");
+});

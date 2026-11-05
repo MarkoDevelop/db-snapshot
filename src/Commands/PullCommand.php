@@ -51,6 +51,8 @@ class PullCommand extends Command
                 $this->warnAboutUndecidedPersonalData($analysis, $profile);
             }
 
+            $this->warnAboutEmptyFollowers($profile);
+
             $ignored = array_keys(array_filter($profile->tables, fn ($rule): bool => $rule->anonymize !== []));
 
             if ($ignored !== [] && ! config('db-snapshot.anonymize.enabled')) {

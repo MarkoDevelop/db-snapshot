@@ -10,6 +10,8 @@ function fakeRemoteSchema(): void
 
     Process::preventStrayProcesses();
     Process::fake([
+        '*KEY_COLUMN_USAGE*' => Process::result(''),
+        '*SELECT DISTINCT TABLE_NAME, COLUMN_NAME*' => Process::result(''),
         '*information_schema.TABLES*' => Process::result(implode("\n", [
             "event_logs\tBASE TABLE\t8773897\t".(3000 * $mb)."\t".(276 * $mb),
             "users\tBASE TABLE\t163\t".(1 * $mb)."\t0",
@@ -95,3 +97,67 @@ it('writes personal data suggestions only when anonymization is on', function (b
     'on' => [true, ['user_email' => 'email']],
     'off' => [false, []],
 ]);
+
+it('records foreign keys and guesses <name>_id columns, skipping polymorphic ones', function () {
+    Process::preventStrayProcesses();
+    Process::fake([
+        '*KEY_COLUMN_USAGE*' => Process::result(implode("\n", [
+            "order_items\torder_id\torders\tid",
+            "orders\tcurrency_code\tcurrencies\tcode",
+        ])),
+        '*SELECT DISTINCT TABLE_NAME, COLUMN_NAME*' => Process::result(implode("\n", ["order_items\torder_id", "orders\tid"])),
+        '*information_schema.TABLES*' => Process::result(implode("\n", [
+            "order_items\tBASE TABLE\t10\t1000\t0",
+            "orders\tBASE TABLE\t10\t1000\t0",
+            "currencies\tBASE TABLE\t10\t1000\t0",
+            "users\tBASE TABLE\t10\t1000\t0",
+            "comments\tBASE TABLE\t10\t1000\t0",
+            "roles\tBASE TABLE\t10\t1000\t0",
+            "role_user\tBASE TABLE\t10\t1000\t0",
+            "user_profiles\tBASE TABLE\t10\t1000\t0",
+            "payments\tBASE TABLE\t10\t1000\t0",
+        ])),
+        '*IS_NULLABLE*' => Process::result(implode("\n", [
+            "order_items\tid\tint\tNULL\t\tPRI\tNO",
+            "order_items\torder_id\tint\tNULL\t\tMUL\tNO",
+            "orders\tid\tint\tNULL\t\tPRI\tNO",
+            "orders\tuser_id\tint\tNULL\t\t\tNO",
+            "orders\tcurrency_code\tchar\t3\t\t\tNO",
+            "orders\twarehouse_id\tint\tNULL\t\t\tYES",
+            "users\tid\tint\tNULL\t\tPRI\tNO",
+            "comments\tid\tint\tNULL\t\tPRI\tNO",
+            "comments\tcommentable_id\tint\tNULL\t\t\tNO",
+            "comments\tcommentable_type\tvarchar\t191\t\t\tNO",
+            "comments\tuser_id\tint\tNULL\t\t\tNO",
+            "roles\tid\tint\tNULL\t\tPRI\tNO",
+            "role_user\trole_id\tint\tNULL\t\tPRI\tNO",
+            "role_user\tuser_id\tint\tNULL\t\tPRI\tNO",
+            "user_profiles\tuser_id\tint\tNULL\t\tPRI\tNO",
+            "payments\tid\tbigint\tNULL\t\tPRI\tNO",
+            "orders\tpayment_id\tvarchar\t64\t\t\tYES",
+        ])),
+        '*information_schema.COLUMNS*' => Process::result(''),
+    ]);
+
+    $analysis = app(Analyzer::class)->analyze(100);
+    $relations = fn (string $table) => array_map(fn ($relation) => $relation->toArray(), $analysis->table($table)->relations);
+
+    expect($relations('order_items'))->toBe([
+        ['column' => 'order_id', 'parent' => 'orders', 'references' => 'id', 'guessed' => false, 'indexed' => true],
+    ])
+        ->and($relations('orders'))->toBe([
+            ['column' => 'currency_code', 'parent' => 'currencies', 'references' => 'code', 'guessed' => false, 'indexed' => false],
+            ['column' => 'user_id', 'parent' => 'users', 'references' => 'id', 'guessed' => true, 'indexed' => false],
+        ])
+        ->and($relations('comments'))->toBe([
+            ['column' => 'user_id', 'parent' => 'users', 'references' => 'id', 'guessed' => true, 'indexed' => false],
+        ])
+        ->and($relations('role_user'))->toBe([
+            ['column' => 'role_id', 'parent' => 'roles', 'references' => 'id', 'guessed' => true, 'indexed' => false],
+            ['column' => 'user_id', 'parent' => 'users', 'references' => 'id', 'guessed' => true, 'indexed' => false],
+        ])
+        ->and($relations('roles'))->toBe([])
+        ->and($relations('user_profiles'))->toBe([
+            ['column' => 'user_id', 'parent' => 'users', 'references' => 'id', 'guessed' => true, 'indexed' => false],
+        ]);
+});
