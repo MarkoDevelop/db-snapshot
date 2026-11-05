@@ -25,7 +25,8 @@ php artisan snapshot:pull        # stream per-table gzipped dumps over SSH, in p
 php artisan snapshot:restore     # drop + recreate the local DB from the latest snapshot
 php artisan snapshot:refresh     # later on: refresh a whole profile, or just some tables
 php artisan snapshot:refresh-table orders users   # pull + replace only these tables
-php artisan snapshot:list        # pick a snapshot to restore or delete (a plain table with --no-interaction)
+php artisan snapshot:addon       # extra tables kept apart from the snapshot, to reapply after restores
+php artisan snapshot:list        # pick a snapshot or add-on to restore, load or delete (a plain table with --no-interaction)
 php artisan snapshot:profiles    # saved profiles with their rules and last pull
 ```
 
@@ -220,7 +221,7 @@ php artisan snapshot:restore 2026-10-08_120000_default --database=dev_other
 - **a profile:** pulls a new snapshot with it and restores the whole database (`--profile=nightly` skips the question). Every question comes first: which profile, which database to restore into, the drop confirmation, and whether to point the app at a new database. After that it pulls and restores without stopping. `--force` asks nothing and restores into the app's database;
 - **some tables:** hands over to `snapshot:refresh-table`.
 
-`snapshot:refresh-table [tables...]` pulls only the given tables (or the ones you pick in a search) and replaces just those tables in your local database. Nothing else is dropped. Each table starts from its rule in the profile (`--profile=`), and you can change the rule for this run. The pulled files are deleted afterwards unless you pass `--keep`, and such partial pulls are never used by `snapshot:restore`.
+`snapshot:refresh-table [tables...]` pulls only the given tables (or the ones you pick in a search) and replaces just those tables in your local database. Nothing else is dropped. Each table starts from its rule in the profile (`--profile=`), and you can change the rule for this run. The pulled files are deleted afterwards unless you pass `--keep` or save them as an [add-on](#add-ons). Partial pulls are never used by `snapshot:restore` as a snapshot. When add-ons exist and no tables are given, it first asks whether the tables come from the server or from an add-on.
 
 A snapshot is a directory of `tables/<table>.sql.gz` files plus `_views.sql.gz`, `_routines.sql.gz` and `manifest.json`. It's written as `<name>.partial` and renamed only when every dump succeeds. A failed pull leaves nothing behind.
 
@@ -244,6 +245,49 @@ php artisan snapshot:restore latest --database='{source}_{date}'    # e.g. produ
 Run interactively without `--database` or `--force`, `snapshot:restore` asks where to restore: the app's database, a new one named from `SNAPSHOT_DATABASE_NAME` (default `{source}_{date}`), or another name. After restoring into another database it offers to point the app at it by setting `DB_DATABASE` in `.env`. `--switch-app` does that without asking.
 
 `snapshot:restore` refuses to run in the `production` environment.
+
+## Add-ons
+
+Keep the base snapshot small, and keep the bigger copies you need now and then as add-ons. An add-on is a few tables, each pulled with the rule you choose (for example all of `orders` instead of the profile's last month), that you can load into any checkout or apply after any restore.
+
+```bash
+php artisan snapshot:addon
+```
+
+```
+Which add-on?
+› 2 hours ago · all-orders · orders, order_items · 1.2 GB
+  New add-on…
+
+What should happen with all-orders?
+› Pull tables into it (replaces those, keeps the rest)
+  Load it into the database
+  Delete it
+```
+
+The usual steps:
+
+1. **Save** some tables to an add-on. They're pulled, replace your local copies, and are kept:
+   ```bash
+   php artisan snapshot:addon all-orders orders order_items   # add-on "all-orders" with these two tables
+   ```
+2. **Load** it in another checkout or worktree, without pulling again:
+   ```bash
+   php artisan snapshot:refresh-table --from=all-orders
+   ```
+3. **Apply** it after a full restore:
+   ```bash
+   php artisan snapshot:restore latest --addon=all-orders
+   ```
+
+Pass `--from` or `--addon` without a name to pick from a list (that also asks with `--force`). `--addon` can be given several times. You don't have to start from `snapshot:addon`: `snapshot:refresh-table` asks before pulling whether to save the tables to an add-on (no by default), or takes `--save=all-orders` (`--save` alone asks which add-on). `snapshot:restore` and `snapshot:refresh` ask which add-ons to apply (none by default, and not with `--force`); both take `--addon`. `snapshot:list` shows add-ons after the snapshots.
+
+Good to know:
+
+- Pulling into an existing add-on replaces only the tables you pulled. Its other tables stay, so an add-on can grow table by table.
+- Restore warns when an add-on has tables pulled more than `addon_max_gap_days` (7) days before or after the snapshot: their rows may point at rows the snapshot doesn't have.
+- Add-ons are applied after the snapshot's tables and before its views, ordered by when each was last saved. When two add-ons hold the same table, the one saved last wins.
+- With pgsql, replacing a table drops foreign keys in *other* tables that point at it (`CASCADE`). The add-on brings back the table's own indexes and constraints, but not those.
 
 ## Drivers
 

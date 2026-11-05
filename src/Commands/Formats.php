@@ -2,6 +2,8 @@
 
 namespace Overthink\DbSnapshot\Commands;
 
+use Carbon\CarbonImmutable;
+use Carbon\CarbonInterface;
 use Closure;
 use Illuminate\Contracts\Process\ProcessResult;
 use Overthink\DbSnapshot\Snapshot\Snapshot;
@@ -39,6 +41,45 @@ trait Formats
             $snapshot->profile(),
             $this->formatBytes($snapshot->bytes()),
             $snapshot->name(),
+        );
+    }
+
+    /**
+     * "2 hours ago · orders-full · orders, order_items · 1.2 GB"
+     */
+    protected function addonLabel(Snapshot $addon): string
+    {
+        return sprintf(
+            '%s · %s · %s · %s',
+            $addon->createdAt()->diffForHumans(),
+            $addon->profile(),
+            implode(', ', $addon->tables()),
+            $this->formatBytes($addon->bytes()),
+        );
+    }
+
+    /**
+     * A warning when an add-on was pulled long before or after the data it
+     * lands on, so its rows may point at rows that don't exist there.
+     */
+    protected function addonAgeWarning(Snapshot $addon, CarbonImmutable $base): ?string
+    {
+        $gapDays = (int) config('db-snapshot.addon_max_gap_days', 7);
+        $pulledAt = $addon->createdAt();
+
+        if (abs($addon->oldestTableAt()->diffInDays($base)) > abs($pulledAt->diffInDays($base))) {
+            $pulledAt = $addon->oldestTableAt();
+        }
+
+        if (abs($pulledAt->diffInDays($base)) <= $gapDays) {
+            return null;
+        }
+
+        return sprintf(
+            'Add-on %s has tables pulled %s %s the snapshot, so their rows may point at rows the snapshot doesn\'t have (or the other way round).',
+            $addon->profile(),
+            $pulledAt->diffForHumans($base, CarbonInterface::DIFF_ABSOLUTE),
+            $pulledAt->greaterThan($base) ? 'after' : 'before',
         );
     }
 

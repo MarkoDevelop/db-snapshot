@@ -78,3 +78,36 @@ it('asks everything before pulling, then pulls and restores into a new database 
     Process::assertRan(fn ($process) => str_contains(commandLine($process), "CREATE DATABASE `{$newDatabase}`"));
     expect(File::get($this->workspace.'/.env'))->toBe("DB_DATABASE={$newDatabase}\n");
 });
+
+it('asks for add-ons up front and applies them after the restore', function () {
+    prepareRefresh($this->workspace);
+    $addon = makeAddon($this->workspace, 'orders', ['orders' => 2], createdAt: now()->subDay()->toIso8601String());
+
+    $this->artisan('snapshot:refresh', ['--profile' => 'default'])
+        ->expectsChoice('Restore into which database?', 'app', [
+            'app' => "dev_app (the app's database)",
+            'new' => 'production_'.now()->format('Y_m_d').' (a database for this snapshot)',
+            'other' => 'Another name…',
+        ])
+        ->expectsConfirmation('Pull [default] and drop and recreate dev_app with it?', 'yes')
+        ->expectsChoice('Also apply add-ons?', [$addon->name()], [$addon->name() => '1 day ago · orders · orders · 2 B'])
+        ->expectsOutputToContain('with orders')
+        ->assertSuccessful();
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), $addon->path.'/tables/orders.sql.gz'));
+});
+
+it('applies --addon without asking, and checks it before pulling', function () {
+    prepareRefresh($this->workspace);
+    $addon = makeAddon($this->workspace, 'orders', ['orders' => 2], createdAt: now()->subDay()->toIso8601String());
+
+    $this->artisan('snapshot:refresh', ['--profile' => 'default', '--addon' => ['nope'], '--force' => true])
+        ->expectsOutputToContain('No add-on [nope]')
+        ->assertFailed();
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'mysqldump'));
+
+    $this->artisan('snapshot:refresh', ['--profile' => 'default', '--addon' => ['orders'], '--force' => true])
+        ->expectsOutputToContain('with orders')
+        ->assertSuccessful();
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), $addon->path.'/tables/orders.sql.gz'));
+});

@@ -28,9 +28,11 @@ final class Restorer
     /**
      * @param  array<string, mixed>  $connection  a Laravel database connection config
      * @param  (Closure(string, ProcessResult, float): void)|null  $onFinished
+     * @param  list<Snapshot>  $addons  applied after the tables and before the views, in this order
+     * @param  (Closure(Snapshot): void)|null  $onAddon  called before each add-on is applied
      * @return list<string> warnings about views or routines that could not be created
      */
-    public function restore(Snapshot $snapshot, array $connection, int $parallel, ?Closure $onFinished = null): array
+    public function restore(Snapshot $snapshot, array $connection, int $parallel, ?Closure $onFinished = null, array $addons = [], ?Closure $onAddon = null): array
     {
         $driver = $this->driverFor($snapshot, $connection);
 
@@ -41,6 +43,16 @@ final class Restorer
         $warnings = $this->importLeniently($driver, $connection, 'routines', $snapshot->routinesFile());
 
         $warnings = [...$warnings, ...$this->importTables($snapshot, $connection, $parallel, $onFinished)];
+
+        // Add-ons replace tables, which (with pgsql's CASCADE) drops views on
+        // them, so they go in before the views are created.
+        foreach ($addons as $addon) {
+            if ($onAddon !== null) {
+                $onAddon($addon);
+            }
+
+            $warnings = [...$warnings, ...$this->importTables($addon, $connection, $parallel, $onFinished)];
+        }
 
         return [
             ...$warnings,
@@ -54,14 +66,20 @@ final class Restorer
      *
      * @param  array<string, mixed>  $connection
      * @param  (Closure(string, ProcessResult, float): void)|null  $onFinished
+     * @param  list<string>|null  $only  import just these of the snapshot's tables
      * @return list<string> warnings about indexes or constraints that could not be created
      */
-    public function importTables(Snapshot $snapshot, array $connection, int $parallel, ?Closure $onFinished = null): array
+    public function importTables(Snapshot $snapshot, array $connection, int $parallel, ?Closure $onFinished = null, ?array $only = null): array
     {
         $driver = $this->driverFor($snapshot, $connection);
         $jobs = [];
+        $files = $snapshot->tableFiles();
 
-        foreach ($snapshot->tableFiles() as $table => $file) {
+        if ($only !== null) {
+            $files = array_intersect_key($files, array_flip($only));
+        }
+
+        foreach ($files as $table => $file) {
             $jobs[$table] = ['command' => $driver->importCommand($connection, $file), 'process' => $this->process($driver, $connection)];
         }
 
@@ -93,7 +111,13 @@ final class Restorer
         }
 
         // Indexes, constraints and triggers of drivers that keep them apart.
-        return $this->importLeniently($driver, $connection, 'indexes or constraints', $snapshot->postDataFile());
+        $warnings = [];
+
+        foreach ($snapshot->postDataFiles($only) as $postData) {
+            $warnings = [...$warnings, ...$this->importLeniently($driver, $connection, 'indexes or constraints', $postData)];
+        }
+
+        return $warnings;
     }
 
     /**

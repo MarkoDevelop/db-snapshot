@@ -119,3 +119,101 @@ it('accepts placeholders in --database without asking', function () {
 
     Process::assertRan(fn ($process) => str_contains(commandLine($process), 'CREATE DATABASE `dev_wt_2026_10_08`'));
 });
+
+it('applies add-ons after the snapshot, oldest first', function () {
+    $this->travelTo('2026-10-12 08:00:00');
+    $imports = [];
+    Process::fake(['*' => function ($process) use (&$imports) {
+        if (preg_match('#snapshots/([^/]+)/tables/orders\.sql\.gz#', commandLine($process), $match)) {
+            $imports[] = $match[1];
+        }
+
+        return Process::result();
+    }]);
+    config()->set('database.connections.target', ['driver' => 'mysql', 'host' => 'mysql', 'port' => 3306, 'username' => 'root', 'password' => '', 'database' => 'dev_wt']);
+    config()->set('db-snapshot.connection', 'target');
+    makeSnapshot($this->workspace.'/snapshots/2026-10-08_120000_default', ['orders' => 1]);
+    makeAddon($this->workspace, 'recent-orders', ['orders' => 2], createdAt: '2026-10-11T08:00:00+00:00');
+    makeAddon($this->workspace, 'all-orders', ['orders' => 3], createdAt: '2026-10-09T08:00:00+00:00');
+
+    $this->artisan('snapshot:restore', ['snapshot' => 'latest', '--addon' => ['recent-orders', 'all-orders'], '--force' => true])
+        ->expectsOutputToContain('with all-orders, recent-orders')
+        ->assertSuccessful();
+
+    expect($imports)->toBe(['2026-10-08_120000_default', '2026-10-09_080000_all-orders', '2026-10-11_080000_recent-orders']);
+});
+
+it('offers saved add-ons and warns when one is far from the snapshot', function () {
+    $this->travelTo('2026-11-01 08:00:00');
+    Process::fake();
+    config()->set('database.connections.target', ['driver' => 'mysql', 'host' => 'mysql', 'port' => 3306, 'username' => 'root', 'password' => '', 'database' => 'dev_wt']);
+    config()->set('db-snapshot.connection', 'target');
+    makeSnapshot($this->workspace.'/snapshots/2026-10-08_120000_default', ['orders' => 1]);
+    $addon = makeAddon($this->workspace, 'orders', ['orders' => 2], createdAt: '2026-10-30T08:00:00+00:00');
+
+    $this->artisan('snapshot:restore', ['snapshot' => 'latest', '--database' => 'dev_wt'])
+        ->expectsChoice('Also apply add-ons?', [$addon->name()], [$addon->name() => '2 days ago · orders · orders · 2 B'])
+        ->expectsOutputToContain('Add-on orders has tables pulled 3 weeks after the snapshot')
+        ->expectsConfirmation('Drop and recreate dev_wt on mysql:3306?', 'yes')
+        ->assertSuccessful();
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), $addon->path.'/tables/orders.sql.gz'));
+});
+
+it('lets you pick add-ons with a bare --addon, even with --force', function () {
+    $this->travelTo('2026-10-09 08:00:00');
+    Process::fake();
+    config()->set('database.connections.target', ['driver' => 'mysql', 'host' => 'mysql', 'port' => 3306, 'username' => 'root', 'password' => '', 'database' => 'dev_wt']);
+    config()->set('db-snapshot.connection', 'target');
+    makeSnapshot($this->workspace.'/snapshots/2026-10-08_120000_default', ['orders' => 1]);
+    $addon = makeAddon($this->workspace, 'orders', ['orders' => 2], createdAt: '2026-10-08T13:00:00+00:00');
+
+    $this->artisan('snapshot:restore', ['snapshot' => 'latest', '--addon' => [null], '--force' => true])
+        ->expectsChoice('Also apply add-ons?', [$addon->name()], [$addon->name() => '19 hours ago · orders · orders · 2 B'])
+        ->assertSuccessful();
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), $addon->path.'/tables/orders.sql.gz'));
+});
+
+it('refuses an add-on of another driver before dropping anything', function () {
+    Process::fake();
+    config()->set('database.connections.target', ['driver' => 'mysql', 'host' => 'mysql', 'port' => 3306, 'username' => 'root', 'password' => '', 'database' => 'dev_wt']);
+    config()->set('db-snapshot.connection', 'target');
+    makeSnapshot($this->workspace.'/snapshots/2026-10-08_120000_default', ['orders' => 1]);
+    $addon = makeAddon($this->workspace, 'orders', ['orders' => 2]);
+    File::put($addon->path.'/manifest.json', json_encode([...$addon->manifest, 'driver' => 'pgsql']));
+
+    $this->artisan('snapshot:restore', ['snapshot' => 'latest', '--addon' => ['orders'], '--force' => true])
+        ->expectsOutputToContain('Add-on orders was pulled with the pgsql driver')
+        ->assertFailed();
+
+    Process::assertNothingRan();
+});
+
+it('warns about a merged add-on whose older tables are far from the snapshot', function () {
+    $this->travelTo('2026-10-09 08:00:00');
+    Process::fake();
+    config()->set('database.connections.target', ['driver' => 'mysql', 'host' => 'mysql', 'port' => 3306, 'username' => 'root', 'password' => '', 'database' => 'dev_wt']);
+    config()->set('db-snapshot.connection', 'target');
+    makeSnapshot($this->workspace.'/snapshots/2026-10-08_120000_default', ['orders' => 1]);
+    $addon = makeAddon($this->workspace, 'orders', ['orders' => 2, 'users' => 1], createdAt: '2026-10-08T13:00:00+00:00');
+    $manifest = $addon->manifest;
+    $manifest['tables']['users']['pulled_at'] = '2026-09-01T08:00:00+00:00';
+    File::put($addon->path.'/manifest.json', json_encode($manifest));
+
+    $this->artisan('snapshot:restore', ['snapshot' => 'latest', '--addon' => ['orders'], '--force' => true])
+        ->expectsOutputToContain('Add-on orders has tables pulled 1 month before the snapshot')
+        ->assertSuccessful();
+});
+
+it('needs an add-on name for a bare --addon when not interactive', function () {
+    Process::fake();
+    makeSnapshot($this->workspace.'/snapshots/2026-10-08_120000_default', ['orders' => 1]);
+    makeAddon($this->workspace, 'orders', ['orders' => 2]);
+
+    $this->artisan('snapshot:restore', ['snapshot' => 'latest', '--addon' => [null], '--no-interaction' => true])
+        ->expectsOutputToContain('--addon needs a name when not interactive.')
+        ->assertFailed();
+
+    Process::assertNothingRan();
+});

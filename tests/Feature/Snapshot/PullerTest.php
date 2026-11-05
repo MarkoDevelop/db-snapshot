@@ -195,3 +195,22 @@ it('ignores anonymize rules when anonymization is off', function () {
     Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'IS_NULLABLE'));
     expect($snapshot->manifest['tables']['orders'])->not->toHaveKey('anonymized');
 });
+
+it('dumps post-data per table for add-ons, so merges can move it with its table', function () {
+    Process::fake();
+    DbSnapshot::extend('fake', fn () => new class extends FakeDriver
+    {
+        public function dumpPostDataCommand(array $tables, string $file): ?string
+        {
+            return 'fake-post-data '.implode(',', $tables)." > {$file}";
+        }
+    });
+    config()->set('db-snapshot.driver', 'fake');
+
+    $addon = app(Puller::class)->pull(new Profile('orders', TableMode::Full), 1, addon: true);
+
+    expect($addon->isAddon())->toBeTrue()
+        ->and($addon->isPartial())->toBeTrue();
+    Process::assertRan(fn ($process) => commandLine($process) === "fake-post-data orders > {$addon->path}.partial/post-data/orders.sql.gz");
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), '_post-data.sql.gz'));
+});

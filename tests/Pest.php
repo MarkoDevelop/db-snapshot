@@ -1,5 +1,6 @@
 <?php
 
+use Carbon\CarbonImmutable;
 use Illuminate\Process\PendingProcess;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Process;
@@ -41,6 +42,22 @@ function makeSnapshot(string $path, array $tableSizes, bool $withRoutines = true
         'created_at' => $createdAt,
         'tables' => array_map(fn (int $size) => ['mode' => 'full', 'where' => null, 'bytes' => $size], $tableSizes),
     ]));
+
+    return Snapshot::load($path);
+}
+
+/**
+ * A saved add-on with these tables, as snapshot:refresh-table --save leaves it.
+ *
+ * @param  array<string, int>  $tableSizes
+ */
+function makeAddon(string $workspace, string $name, array $tableSizes, string $createdAt = '2026-10-08T12:00:00+00:00'): Snapshot
+{
+    $path = $workspace.'/snapshots/'.CarbonImmutable::parse($createdAt)->format('Y-m-d_His').'_'.$name;
+    makeSnapshot($path, $tableSizes, withRoutines: false, createdAt: $createdAt, profile: $name);
+
+    $manifest = json_decode(File::get($path.'/manifest.json'), true);
+    File::put($path.'/manifest.json', json_encode([...$manifest, 'partial' => true, 'addon' => true]));
 
     return Snapshot::load($path);
 }
