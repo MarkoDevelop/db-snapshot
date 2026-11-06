@@ -5,6 +5,7 @@ namespace Overthink\DbSnapshot\Commands;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\File;
 use Overthink\DbSnapshot\Analysis\Analyzer;
+use Overthink\DbSnapshot\Analysis\Relation;
 use Overthink\DbSnapshot\Analysis\TableInfo;
 use Overthink\DbSnapshot\Profile\Profile;
 use Overthink\DbSnapshot\Profile\TableMode;
@@ -186,9 +187,9 @@ class RefreshTableCommand extends Command
         $tables = array_filter($analysis->tables, fn (TableInfo $table): bool => ! $table->isView);
         $names = $this->argument('tables') ?: multisearch(
             label: 'Tables to refresh (type to search)',
-            options: fn (string $search): array => array_map(
+            options: fn (?string $search): array => array_map(
                 fn (TableInfo $table): string => $this->tableLabel($table, $profile->tables[$table->name] ?? null),
-                array_filter($tables, fn (TableInfo $table): bool => $search === '' || str_contains($table->name, $search)),
+                array_filter($tables, fn (TableInfo $table): bool => trim((string) $search) === '' || str_contains($table->name, trim((string) $search))),
             ),
             scroll: 15,
             required: true,
@@ -206,12 +207,17 @@ class RefreshTableCommand extends Command
         }
 
         $followers = $this->followersOf($profile, $names, $tables);
+        $declined = [];
 
         if ($followers !== [] && $this->input->isInteractive()
             && confirm('Also refresh '.implode(', ', $followers).'? They follow '.implode(', ', $names).'.', default: true)) {
             $names = [...$names, ...$followers];
         } elseif ($followers !== []) {
-            note(implode(', ', $followers).' follow '.implode(', ', $names).'; name them too to refresh them.');
+            if ($this->input->isInteractive()) {
+                $declined = $followers;
+            } else {
+                note(implode(', ', $followers).' follow '.implode(', ', $names).'; name them too to refresh them.');
+            }
             $followers = [];
         }
 
@@ -230,6 +236,12 @@ class RefreshTableCommand extends Command
 
         foreach ($this->rulesToChange($rules, $changeable) as $name) {
             $rules[$name] = $this->askRule($tables[$name], $rules[$name], array_diff_key([...$profile->tables, ...$rules], [$name => true]));
+        }
+
+        // Then the tables pointing at them that the profile doesn't make follow them,
+        // asked once the rules they'd follow are settled.
+        if ($this->input->isInteractive()) {
+            $rules = [...$rules, ...$this->askChildren($tables, $profile, $rules, $declined)];
         }
 
         foreach ($rules as $name => $rule) {
@@ -427,6 +439,76 @@ class RefreshTableCommand extends Command
         }
 
         return null;
+    }
+
+    /**
+     * Offer the tables pointing at the picked ones (order_items for orders),
+     * then their own children, to come along following them for this run.
+     * The rows they get follow the picked table's rule, so all orders bring
+     * all their items and six months of orders only those orders' items.
+     *
+     * Tables with a rule of their own in the profile are offered unchecked,
+     * so a deliberate skip or limit isn't dropped by pressing Enter.
+     *
+     * @param  array<string, TableInfo>  $tables
+     * @param  array<string, TableRule>  $picked  the picked tables with their rules for this run
+     * @param  list<string>  $declined  profile followers already turned down
+     * @return array<string, TableRule>
+     */
+    private function askChildren(array $tables, Profile $profile, array $picked, array $declined): array
+    {
+        $children = [];
+        $offered = array_fill_keys([...array_keys($picked), ...$declined], true);
+
+        do {
+            $rules = [...$profile->tables, ...$picked, ...$children];
+            $parents = [...array_keys($picked), ...array_keys($children)];
+            $candidates = [];
+
+            foreach ($tables as $name => $table) {
+                if (isset($offered[$name])) {
+                    continue;
+                }
+
+                $relations = array_values(array_filter(
+                    $this->followableRelations($table, null, $rules),
+                    fn (Relation $relation): bool => in_array($relation->parent, $parents, true),
+                ));
+
+                // Pointing at several picked tables: the date-filtered one, as configure does.
+                usort($relations, fn (Relation $a, Relation $b): int => $this->isRecentChain($b->parent, $rules) <=> $this->isRecentChain($a->parent, $rules));
+
+                if ($relations !== []) {
+                    $candidates[$name] = $relations[0];
+                }
+            }
+
+            if ($candidates === []) {
+                break;
+            }
+
+            $offered += $candidates;
+
+            $chosen = multiselect(
+                label: 'Also refresh the tables that belong to '.implode(', ', array_unique(array_map(fn (Relation $relation): string => $relation->parent, $candidates))).'?',
+                options: array_combine(array_keys($candidates), array_map(
+                    fn (string $name, Relation $relation): string => "{$name} · {$this->formatBytes($tables[$name]->bytes())} → {$relation->describe()}"
+                        .($relation->indexed ? '' : ", {$relation->column} not indexed")
+                        .(isset($profile->tables[$name]) ? ' · profile: '.$profile->tables[$name]->describe() : ''),
+                    array_keys($candidates),
+                    $candidates,
+                )),
+                default: array_keys(array_diff_key($candidates, $profile->tables)),
+                scroll: 15,
+                hint: 'Checked tables get only the rows of the copied parent rows, for this run. Tables with a rule in the profile start unchecked.',
+            );
+
+            foreach ($chosen as $name) {
+                $children[(string) $name] = $this->followRule($candidates[$name]);
+            }
+        } while ($chosen !== []);
+
+        return $children;
     }
 
     /**

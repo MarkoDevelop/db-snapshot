@@ -4,6 +4,7 @@ namespace Overthink\DbSnapshot\Commands;
 
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\File;
+use Laravel\Prompts\MultiSearchPrompt;
 use Overthink\DbSnapshot\Analysis\Analysis;
 use Overthink\DbSnapshot\Analysis\Analyzer;
 use Overthink\DbSnapshot\Analysis\ColumnInfo;
@@ -92,31 +93,41 @@ class ConfigureCommand extends Command
         $largeMb = (int) config('db-snapshot.large_table_mb');
         $baseTables = array_filter($analysis->tables, fn (TableInfo $table): bool => ! $table->isView);
 
-        // Large tables and tables that already have a rule, with the rules preselected.
+        // Large tables and tables that already have a rule are shown before typing,
+        // with the rules preselected; typing searches every table.
         $listed = array_filter($baseTables, fn (TableInfo $table): bool => $table->bytes() >= $largeMb * 1024 * 1024 || isset($rules[$table->name]));
+        $label = fn (TableInfo $table): string => $this->tableLabel($table, $rules[$table->name] ?? null);
         $unruled = self::unruledPhrase($existing->defaultMode);
-        $selected = $listed === [] ? [] : multiselect(
-            label: 'Which tables need their own rule?',
-            options: array_map(fn (TableInfo $table): string => $this->tableLabel($table, $rules[$table->name] ?? null), $listed),
-            default: array_values(array_intersect(array_keys($listed), array_keys($rules))),
-            scroll: 15,
-            hint: "Tables of {$largeMb} MB or more and tables with rules. Space to toggle; unselected ones are {$unruled}.",
-        );
 
-        if ($listed === []) {
-            note("No table is {$largeMb} MB or larger.");
+        $picker = new MultiSearchPrompt(
+            label: 'Which tables need their own rule?',
+            // The plain fallback prompt passes null for an empty answer.
+            options: fn (?string $search): array => array_map($label, trim((string) $search) === '' && $listed !== []
+                ? $listed
+                : array_filter($baseTables, fn (TableInfo $table): bool => str_contains(strtolower($table->name), strtolower(trim((string) $search))))),
+            placeholder: 'Type to search all tables',
+            scroll: 15,
+            hint: ($listed === [] ? 'No table is '.$largeMb.' MB or larger. ' : "Shown: tables of {$largeMb} MB or more and tables with rules. ")
+                ."Space to toggle; unselected ones are {$unruled}.",
+        );
+        $ruled = array_intersect_key($baseTables, $rules);
+        $kept = [];
+
+        if (MultiSearchPrompt::shouldFallback()) {
+            // The plain fallback prompt (Windows, tests) can't show what's preselected,
+            // so the current rules get their own question.
+            $kept = $ruled === [] ? [] : array_map(strval(...), multiselect(
+                label: 'Keep the rules of these tables?',
+                options: array_map($label, $ruled),
+                default: array_keys($ruled),
+                scroll: 15,
+                hint: "Unselected ones are {$unruled}.",
+            ));
+        } else {
+            $picker->values = array_map($label, $ruled);
         }
 
-        $others = array_diff_key($baseTables, $listed);
-        $selected = [...$selected, ...($others === [] ? [] : multisearch(
-            label: 'Any other tables that need their own rule? (type to search, Enter for none)',
-            options: fn (string $search): array => array_map(
-                fn (TableInfo $table): string => $this->tableLabel($table, null),
-                array_filter($others, fn (TableInfo $table): bool => $search === '' || str_contains($table->name, $search)),
-            ),
-            placeholder: 'e.g. failed_jobs',
-            scroll: 15,
-        ))];
+        $selected = array_values(array_unique([...$kept, ...array_map(strval(...), $picker->prompt())]));
 
         $toChange = $this->rulesToChange($selected, $rules);
         $newRules = [];
@@ -129,7 +140,7 @@ class ConfigureCommand extends Command
 
         foreach ($selected as $tableName) {
             if (! isset($newRules[$tableName])) {
-                $newRules[$tableName] = $this->askRule($analysis->tables[$tableName], $rules[$tableName] ?? null, $newRules);
+                $newRules[$tableName] = $this->askRule($analysis->tables[$tableName], $rules[$tableName] ?? null, $newRules, $analysis->tables);
             }
         }
 
@@ -250,23 +261,6 @@ class ConfigureCommand extends Command
         } while ($picked !== []);
 
         return $rules;
-    }
-
-    /**
-     * Whether $table's rule, or the rule its follow chain ends at, is "recent".
-     *
-     * @param  array<string, TableRule>  $rules
-     */
-    private function isRecentChain(string $table, array $rules): bool
-    {
-        $seen = [];
-
-        while (($rules[$table] ?? null)?->mode === TableMode::Follow && ! isset($seen[$table])) {
-            $seen[$table] = true;
-            $table = (string) $rules[$table]->parent;
-        }
-
-        return ($rules[$table] ?? null)?->mode === TableMode::Recent;
     }
 
     /**

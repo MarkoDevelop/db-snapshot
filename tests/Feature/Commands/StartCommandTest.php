@@ -201,8 +201,8 @@ it('re-analyzes and opens the profile editor with --fresh, keeping the connectio
 
     $this->artisan('snapshot', ['--fresh' => true])
         ->expectsOutputToContain('Connected: mysql 8.4.8')
-        ->expectsQuestion('Any other tables that need their own rule? (type to search, Enter for none)', 'orders')
-        ->expectsChoice('Any other tables that need their own rule? (type to search, Enter for none)', ['orders'], ['orders' => 'orders · 1000 B · ~10 rows'])
+        ->expectsQuestion('Which tables need their own rule?', 'orders')
+        ->expectsChoice('Which tables need their own rule?', ['orders'], ['orders' => 'orders · 1000 B · ~10 rows'])
         ->expectsChoice('orders (1000 B, ~10 rows)', 'full', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
         ->expectsConfirmation('Save profile [default]?', 'yes')
         ->expectsChoice('Profile [default] is ready. What now?', 'later', nextStepOptions())

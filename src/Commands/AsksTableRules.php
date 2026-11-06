@@ -23,8 +23,9 @@ trait AsksTableRules
 
     /**
      * @param  array<string, TableRule>  $otherRules  rules of the other tables, so Follow never closes a loop
+     * @param  array<string, TableInfo>  $tables  all tables, to point out the ones that could follow $table
      */
-    protected function askRule(TableInfo $table, ?TableRule $current, array $otherRules = []): TableRule
+    protected function askRule(TableInfo $table, ?TableRule $current, array $otherRules = [], array $tables = []): TableRule
     {
         $relations = $this->followableRelations($table, $current, $otherRules);
 
@@ -45,6 +46,7 @@ trait AsksTableRules
                 array_map(fn (TableMode $mode): string => $mode->label(), $modes),
             ),
             default: in_array($suggested, $modes, true) ? $suggested->value : TableMode::Full->value,
+            hint: $this->childrenHint($table, $tables, $otherRules),
         ));
 
         return match ($mode) {
@@ -121,6 +123,50 @@ trait AsksTableRules
         $picked = array_values(array_filter($relations, fn (Relation $relation): bool => $relation->parent === $parent && $relation->column === $column));
 
         return $this->followRule($picked[0] ?? $relations[0]);
+    }
+
+    /**
+     * Follow goes from a child to its parent, so for a parent like orders the
+     * way to bring order_items along is a filter here and Follow on them.
+     *
+     * @param  array<string, TableInfo>  $tables
+     * @param  array<string, TableRule>  $otherRules
+     */
+    private function childrenHint(TableInfo $table, array $tables, array $otherRules): string
+    {
+        $children = array_keys(array_filter(
+            $tables,
+            fn (TableInfo $other): bool => $other->name !== $table->name
+                && ($otherRules[$other->name] ?? null)?->parent !== $table->name
+                && array_filter($other->relations, fn (Relation $relation): bool => $relation->parent === $table->name) !== [],
+        ));
+
+        if ($children === []) {
+            return '';
+        }
+
+        $names = count($children) > 3
+            ? implode(', ', array_slice($children, 0, 3)).' and '.(count($children) - 3).' more'
+            : implode(', ', $children);
+
+        return "{$names} point at {$table->name}. To copy only their rows of copied {$table->name}, filter {$table->name} here (Recent or Where) and let them Follow it.";
+    }
+
+    /**
+     * Whether $table's rule, or the rule its follow chain ends at, is "recent".
+     *
+     * @param  array<string, TableRule>  $rules
+     */
+    protected function isRecentChain(string $table, array $rules): bool
+    {
+        $seen = [];
+
+        while (($rules[$table] ?? null)?->mode === TableMode::Follow && ! isset($seen[$table])) {
+            $seen[$table] = true;
+            $table = (string) $rules[$table]->parent;
+        }
+
+        return ($rules[$table] ?? null)?->mode === TableMode::Recent;
     }
 
     protected function followRule(Relation $relation): TableRule
