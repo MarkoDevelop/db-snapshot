@@ -3,6 +3,7 @@
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Process;
 use Overthink\DbSnapshot\Analysis\Analysis;
+use Overthink\DbSnapshot\Analysis\DateColumn;
 use Overthink\DbSnapshot\Analysis\Relation;
 use Overthink\DbSnapshot\Analysis\TableInfo;
 use Overthink\DbSnapshot\Profile\Profile;
@@ -231,6 +232,99 @@ function prepareFollowingRefresh(string $workspace): void
         'event_logs' => new TableRule(TableMode::Follow, 'order_id', parent: 'orders'),
     ]))->save($workspace.'/profiles');
 }
+
+/**
+ * orders ← event_logs ← users, as order_items and order_serials hang off
+ * orders, with no follow rules in the profile.
+ */
+function prepareChildrenRefresh(string $workspace, TableRule $orders): void
+{
+    prepareRefresh($workspace);
+
+    (new Analysis('production', now()->toImmutable(), [
+        'orders' => new TableInfo('orders', false, 10, 1000, 0),
+        'event_logs' => new TableInfo('event_logs', false, 10, 1000, 0, relations: [new Relation('order_id', 'orders')]),
+        'users' => new TableInfo('users', false, 10, 1000, 0, relations: [new Relation('event_log_id', 'event_logs', guessed: true, indexed: false)]),
+    ]))->save($workspace.'/analysis.json');
+
+    (new Profile('default', TableMode::Full, ['orders' => $orders]))->save($workspace.'/profiles');
+}
+
+it('offers the tables pointing at a picked one, level by level, without follow rules', function () {
+    prepareChildrenRefresh($this->workspace, new TableRule(TableMode::Where, where: 'id > 5'));
+
+    $this->artisan('snapshot:refresh-table', ['tables' => ['orders'], '--force' => true])
+        ->expectsChoice('Also refresh the tables that belong to orders?', ['event_logs'], ['event_logs' => 'event_logs · 1000 B → orders by order_id (foreign key)'])
+        ->expectsChoice('Also refresh the tables that belong to event_logs?', ['users'], ['users' => 'users · 1000 B → event_logs by event_log_id (guessed from the name), event_log_id not indexed'])
+        ->expectsOutputToContain('Refreshed orders, event_logs, users')
+        ->assertSuccessful();
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'tables/event_logs.sql.gz')
+        && str_contains(commandLine($process), '--where=`order_id` IN (SELECT `id` FROM (SELECT `id` FROM `production`.`orders` WHERE id > 5) AS `_orders`)'));
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'tables/users.sql.gz') && str_contains(commandLine($process), '`event_log_id` IN'));
+    expect(Profile::load($this->workspace.'/profiles', 'default')->tables)->toHaveKeys(['orders'])->not->toHaveKey('event_logs');
+});
+
+it('copies the children of a full table in full', function () {
+    prepareChildrenRefresh($this->workspace, new TableRule(TableMode::Full));
+
+    $this->artisan('snapshot:refresh-table', ['tables' => ['orders'], '--force' => true])
+        ->expectsChoice('Also refresh the tables that belong to orders?', ['event_logs'], ['event_logs' => 'event_logs · 1000 B → orders by order_id (foreign key)'])
+        ->expectsChoice('Also refresh the tables that belong to event_logs?', [], ['users' => 'users · 1000 B → event_logs by event_log_id (guessed from the name), event_log_id not indexed'])
+        ->expectsOutputToContain('Refreshed orders, event_logs in')
+        ->assertSuccessful();
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'tables/event_logs.sql.gz') && ! str_contains(commandLine($process), '--where'));
+    Process::assertNotRan(fn ($process) => str_contains(commandLine($process), 'tables/users.sql.gz'));
+});
+
+it('offers children with a profile rule unchecked, after the rules for this run', function () {
+    prepareChildrenRefresh($this->workspace, new TableRule(TableMode::Full));
+    $profile = Profile::load($this->workspace.'/profiles', 'default');
+    (new Profile('default', TableMode::Full, [...$profile->tables, 'event_logs' => new TableRule(TableMode::Skip)]))->save($this->workspace.'/profiles');
+
+    $this->artisan('snapshot:refresh-table')
+        ->expectsQuestion('Tables to refresh (type to search)', null)
+        ->expectsChoice('Tables to refresh (type to search)', ['orders'], [
+            'orders' => 'orders · 1000 B · ~10 rows · now: full',
+            'event_logs' => 'event_logs · 1000 B · ~10 rows · now: skip',
+            'users' => 'users · 1000 B · ~10 rows',
+        ])
+        ->expectsChoice('Change any rule for this run?', ['orders'], ['orders' => 'orders · full'])
+        ->expectsChoice('orders (1000 B, ~10 rows)', 'where', modeOptions([TableMode::Full, TableMode::Schema, TableMode::Where, TableMode::Skip]))
+        ->expectsQuestion('WHERE clause for orders', 'id > 7')
+        ->expectsChoice('Also refresh the tables that belong to orders?', ['event_logs'], ['event_logs' => 'event_logs · 1000 B → orders by order_id (foreign key) · profile: skip'])
+        ->expectsChoice('Also refresh the tables that belong to event_logs?', [], ['users' => 'users · 1000 B → event_logs by event_log_id (guessed from the name), event_log_id not indexed'])
+        ->expectsChoice('Replace orders, event_logs in dev_app?', 'replace', replaceOptions())
+        ->assertSuccessful();
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'tables/event_logs.sql.gz') && str_contains(commandLine($process), 'WHERE id > 7)'));
+});
+
+it('makes a child pointing at several picked tables follow the date-filtered one', function () {
+    prepareRefresh($this->workspace);
+
+    (new Analysis('production', now()->toImmutable(), [
+        'orders' => new TableInfo('orders', false, 10, 1000, 0, dateColumns: [new DateColumn('created_at', 'datetime', true)]),
+        'users' => new TableInfo('users', false, 10, 1000, 0),
+        'event_logs' => new TableInfo('event_logs', false, 10, 1000, 0, relations: [new Relation('user_id', 'users'), new Relation('order_id', 'orders')]),
+    ]))->save($this->workspace.'/analysis.json');
+    (new Profile('default', TableMode::Full, ['orders' => new TableRule(TableMode::Recent, 'created_at', months: 6)]))->save($this->workspace.'/profiles');
+
+    $this->artisan('snapshot:refresh-table', ['tables' => ['users', 'orders'], '--force' => true])
+        ->expectsChoice('Also refresh the tables that belong to orders?', ['event_logs'], ['event_logs' => 'event_logs · 1000 B → orders by order_id (foreign key)'])
+        ->assertSuccessful();
+
+    Process::assertRan(fn ($process) => str_contains(commandLine($process), 'tables/event_logs.sql.gz') && str_contains(commandLine($process), '`order_id` IN'));
+});
+
+it('does not offer children without interaction', function () {
+    prepareChildrenRefresh($this->workspace, new TableRule(TableMode::Full));
+
+    $this->artisan('snapshot:refresh-table', ['tables' => ['orders'], '--force' => true, '--no-interaction' => true])
+        ->expectsOutputToContain('Refreshed orders in')
+        ->assertSuccessful();
+});
 
 it('offers to refresh the tables following the picked ones', function () {
     prepareFollowingRefresh($this->workspace);
